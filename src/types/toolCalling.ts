@@ -1,0 +1,96 @@
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, ParameterDef>;
+    required: string[];
+  };
+}
+
+export interface ParameterDef {
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+  description: string;
+  enum?: unknown[];
+  items?: ParameterDef;
+}
+
+export interface ToolCallRequest {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  timestamp: number;
+}
+
+export interface ToolCallResult {
+  id: string;
+  toolName: string;
+  success: boolean;
+  output: unknown;
+  error?: string;
+  executionTime: number;
+}
+
+export const AIR_QUALITY_TOOLS: ToolDefinition[] = [
+  {
+    name: 'load_air_quality_data',
+    description: 'Load air quality dataset from local pickle file',
+    parameters: {
+      type: 'object',
+      properties: {
+        dataset_name: {
+          type: 'string',
+          description: 'Name of the dataset (e.g., "air_quality_data")',
+        },
+      },
+      required: ['dataset_name'],
+    },
+  },
+  {
+    name: 'filter_data',
+    description: 'Filter data based on conditions',
+    parameters: {
+      type: 'object',
+      properties: {
+        condition: {
+          type: 'string',
+          description: 'Filter condition (e.g., "PM25 > 100")',
+        },
+      },
+      required: ['condition'],
+    },
+  },
+  {
+    name: 'compute_statistics',
+    description: 'Compute statistics on the data',
+    parameters: {
+      type: 'object',
+      properties: {
+        metric: {
+          type: 'string',
+          description: 'Metric to compute (mean, median, std, etc.)',
+        },
+      },
+      required: ['metric'],
+    },
+  },
+  {
+    name: 'generate_plot',
+    description: 'Generate a visualization plot',
+    parameters: {
+      type: 'object',
+      properties: {
+        plot_type: {
+          type: 'string',
+          enum: ['line', 'bar', 'scatter', 'heatmap', 'histogram'],
+        },
+        columns: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Columns to plot',
+        },
+      },
+      required: ['plot_type', 'columns'],
+    },
+  },
+];
