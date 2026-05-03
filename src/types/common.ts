@@ -11,6 +11,15 @@ export interface Response {
   toolCalls?: ToolCall[];
   code?: string;
   executionResult?: ExecutionResult;
+  metrics?: InferenceMetrics;
+}
+
+export interface InferenceMetrics {
+  generationTimeMs: number;
+  timeToFirstTokenMs: number;
+  outputTokens: number;
+  tokensPerSecond: number;
+  promptTokens?: number;
 }
 
 export interface ExecutionResult {
@@ -35,4 +44,7 @@ export interface ToolCall {
   status: 'pending' | 'executing' | 'completed' | 'failed';
   result?: unknown;
   error?: string;
+  metadata?: {
+    plots?: unknown[];
+  };
 }

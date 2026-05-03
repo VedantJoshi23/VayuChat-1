@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import { executeSql } from './db';
+import { getDatabase } from './db';
 import { Conversation } from '../types/chat';
-import { DB_TABLES } from './schema';
+import ConversationModel from './models/ConversationModel';
 
 export class ChatRepository {
   async createConversation(
@@ -10,108 +10,102 @@ export class ChatRepository {
     mode: 'tool_calling' | 'direct_inference',
     systemPrompt?: string
   ): Promise<Conversation> {
-    const id = uuidv4();
+    const db = getDatabase();
     const now = Date.now();
 
-    const conversation: Conversation = {
-      id,
-      title,
-      createdAt: now,
-      updatedAt: now,
-      modelUsed,
-      mode,
-      messageCount: 0,
-      systemPrompt,
-    };
+    const conversation = await db.write(async () => {
+      return await db.collections.get<ConversationModel>('conversations').create(
+        (conv) => {
+          conv.title = title;
+          conv.createdAt = now;
+          conv.updatedAt = now;
+          conv.modelUsed = modelUsed;
+          conv.mode = mode;
+          conv.messageCount = 0;
+          if (systemPrompt) conv.systemPrompt = systemPrompt;
+          conv.archived = false;
+        }
+      );
+    });
 
-    await executeSql(
-      `INSERT INTO ${DB_TABLES.CONVERSATIONS}
-       (id, title, created_at, updated_at, model_used, mode, system_prompt)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, title, now, now, modelUsed, mode, systemPrompt || null]
-    );
-
-    return conversation;
+    return this.modelToConversation(conversation);
   }
 
   async getConversation(id: string): Promise<Conversation | null> {
-    const result = await executeSql(
-      `SELECT * FROM ${DB_TABLES.CONVERSATIONS} WHERE id = ?`,
-      [id]
-    );
-
-    if (result.rows.length === 0) return null;
-
-    const row = result.rows.item(0);
-    return this.rowToConversation(row);
+    const db = getDatabase();
+    const conv = await db.collections
+      .get<ConversationModel>('conversations')
+      .find(id);
+    return conv ? this.modelToConversation(conv) : null;
   }
 
   async getAllConversations(): Promise<Conversation[]> {
-    const result = await executeSql(
-      `SELECT * FROM ${DB_TABLES.CONVERSATIONS}
-       WHERE archived = 0
-       ORDER BY updated_at DESC`
-    );
+    const db = getDatabase();
+    const convs = await db.collections
+      .get<ConversationModel>('conversations')
+      .query()
+      .fetch();
 
-    const conversations: Conversation[] = [];
-    for (let i = 0; i < result.rows.length; i++) {
-      conversations.push(this.rowToConversation(result.rows.item(i)));
-    }
-    return conversations;
+    return convs
+      .filter((c) => !c.archived)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .map((c) => this.modelToConversation(c));
   }
 
   async updateConversation(
     id: string,
     updates: Partial<Conversation>
   ): Promise<void> {
-    const setClauses: string[] = [];
-    const values: unknown[] = [];
+    const db = getDatabase();
+    const conv = await db.collections
+      .get<ConversationModel>('conversations')
+      .find(id);
 
-    if (updates.title !== undefined) {
-      setClauses.push('title = ?');
-      values.push(updates.title);
-    }
-    if (updates.messageCount !== undefined) {
-      setClauses.push('message_count = ?');
-      values.push(updates.messageCount);
-    }
-
-    setClauses.push('updated_at = ?');
-    values.push(Date.now());
-    values.push(id);
-
-    if (setClauses.length > 0) {
-      await executeSql(
-        `UPDATE ${DB_TABLES.CONVERSATIONS} SET ${setClauses.join(', ')} WHERE id = ?`,
-        values as (string | number)[]
-      );
-    }
+    await db.write(async () => {
+      await conv.update(() => {
+        if (updates.title !== undefined) conv.title = updates.title;
+        if (updates.messageCount !== undefined)
+          conv.messageCount = updates.messageCount;
+        conv.updatedAt = Date.now();
+      });
+    });
   }
 
   async deleteConversation(id: string): Promise<void> {
-    await executeSql(
-      `DELETE FROM ${DB_TABLES.CONVERSATIONS} WHERE id = ?`,
-      [id]
-    );
+    const db = getDatabase();
+    const conv = await db.collections
+      .get<ConversationModel>('conversations')
+      .find(id);
+
+    await db.write(async () => {
+      await conv.destroyPermanently();
+    });
   }
 
   async archiveConversation(id: string): Promise<void> {
-    await executeSql(
-      `UPDATE ${DB_TABLES.CONVERSATIONS} SET archived = 1, updated_at = ? WHERE id = ?`,
-      [Date.now(), id]
-    );
+    const db = getDatabase();
+    const conv = await db.collections
+      .get<ConversationModel>('conversations')
+      .find(id);
+
+    await db.write(async () => {
+      await conv.update(() => {
+        conv.archived = true;
+        conv.updatedAt = Date.now();
+      });
+    });
   }
 
-  private rowToConversation(row: any): Conversation {
+  private modelToConversation(model: ConversationModel): Conversation {
     return {
-      id: row.id,
-      title: row.title,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      modelUsed: row.model_used,
-      mode: row.mode,
-      messageCount: row.message_count || 0,
-      systemPrompt: row.system_prompt,
+      id: model.id,
+      title: model.title || '',
+      createdAt: model.createdAt || 0,
+      updatedAt: model.updatedAt || 0,
+      modelUsed: model.modelUsed || 'default',
+      mode: (model.mode || 'tool_calling') as 'tool_calling' | 'direct_inference',
+      messageCount: model.messageCount || 0,
+      systemPrompt: model.systemPrompt,
     };
   }
 }

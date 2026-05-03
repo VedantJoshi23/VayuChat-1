@@ -1,90 +1,99 @@
 import { BaseLLMEngine } from './LLMEngine';
 import { Response, StreamEvent, ToolCall } from '../../types/common';
-import { Message } from '../../types/chat';
 import { v4 as uuidv4 } from 'uuid';
+import * as llamaRNBridge from './llamaRNBridge';
+import { FunctionCall } from '../dataOperations/DataFrameManager';
 
 export class ToolCallingEngine extends BaseLLMEngine {
+  async initialize(config: any): Promise<void> {
+    await super.initialize(config);
+  }
+
   async generate(
-    userQuery: string,
-    context: Message[],
-    onStream: (event: StreamEvent) => void
+    prompt: string,
+    onStream: (event: StreamEvent) => void,
+    abortSignal?: AbortSignal
   ): Promise<Response> {
     if (!this.isReady()) {
       throw new Error('ToolCallingEngine not initialized');
     }
 
-    // Build system prompt for tool calling
-    const systemPrompt = `You are an AI assistant specialized in air quality analysis.
-You have access to the following tools:
+    const result = await llamaRNBridge.generate(
+      prompt,
+      {
+        temperature: this.config?.temperature ?? 0.2,
+        maxTokens: this.config?.maxTokens ?? 1024,
+        topK: this.config?.topK ?? 40,
+        topP: this.config?.topP ?? 0.9,
+        stop: ['</function_calls>', '<|end|>', '<|im_end|>', '<end_of_turn>', '</s>'],
+      },
+      (token) => {
+        onStream({ type: 'token', content: token, timestamp: Date.now() });
+      },
+      abortSignal
+    );
 
-1. load_air_quality_data(dataset_name: string) - Load a dataset
-2. filter_data(condition: string) - Filter dataset by condition
-3. compute_statistics(metric: string) - Compute statistics
-4. generate_plot(plot_type: string, columns: list) - Generate visualizations
+    // Ensure we have the closing tag if the model stopped at it
+    const fullText = result.text.includes('</function_calls>')
+      ? result.text
+      : result.text + '</function_calls>';
 
-When the user asks a question, respond with a JSON array of tool calls if needed, then provide analysis.
-Format: [{"tool": "tool_name", "args": {"key": "value"}}]`;
-
-    const contextPrompt = this.buildContextPrompt(context);
-
-    const fullPrompt = `${systemPrompt}
-
-Previous context:
-${contextPrompt}
-
-User query: ${userQuery}
-
-Respond with tool calls if needed, then analysis:`;
-
-    // TODO: Integrate actual LLM inference here
-    // For now, simulate streaming response
-    const mockResponse = this.generateMockResponse(userQuery);
-
-    // Simulate streaming
-    for (const token of mockResponse.split(' ')) {
-      onStream({
-        type: 'token',
-        content: token + ' ',
-        timestamp: Date.now(),
-      });
-      // In real implementation, await actual model inference
-    }
-
-    const toolCalls = this.parseToolCalls(mockResponse);
+    const parsed = parseFunctionCalls(fullText);
 
     return {
       type: 'tool_calling',
-      content: mockResponse,
-      toolCalls,
+      content: fullText,
+      toolCalls: parsed.map((fc) => functionCallToToolCall(fc)),
+      metrics: {
+        generationTimeMs: result.generationTimeMs,
+        timeToFirstTokenMs: result.timeToFirstTokenMs,
+        outputTokens: result.outputTokens,
+        tokensPerSecond: result.tokensPerSecond,
+      },
     };
   }
 
-  private parseToolCalls(responseText: string): ToolCall[] {
-    try {
-      // Look for JSON array in response
-      const match = responseText.match(/\[[\s\S]*\]/);
-      if (!match) return [];
-
-      const parsed = JSON.parse(match[0]);
-      if (!Array.isArray(parsed)) return [];
-
-      return parsed.map((tc: any) => ({
-        id: uuidv4(),
-        name: tc.tool || tc.name || '',
-        arguments: tc.args || tc.arguments || {},
-        status: 'pending' as const,
-        timestamp: Date.now(),
-      }));
-    } catch {
-      return [];
-    }
+  async unload(): Promise<void> {
+    await super.unload();
   }
+}
 
-  private generateMockResponse(userQuery: string): string {
-    // Mock response for testing
-    if (userQuery.toLowerCase().includes('pm25')) {
-      return `I'll help you analyze PM2.5 levels. [{"tool": "load_air_quality_data", "args": {"dataset_name": "air_quality"}}] Let me fetch the data and compute statistics.`;
-    }
-    return `I'll help you with that. [{"tool": "load_air_quality_data", "args": {"dataset_name": "air_quality"}}]`;
-  }
+/**
+ * Parse <function_calls>[...]</function_calls> from model output.
+ * Handles both JSON (double quotes) and Python-dict (single quotes) formats.
+ */
+export function parseFunctionCalls(text: string): FunctionCall[] {
+  // Try extracting from <function_calls> tag first
+  const tagMatch = text.match(/<function_calls>\s*([\s\S]*?)\s*(?:<\/function_calls>|$)/);
+  const raw = tagMatch ? tagMatch[1].trim() : text.trim();
+
+  if (!raw || !raw.startsWith('[')) return [];
+
+  // 1. Try strict JSON
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as FunctionCall[];
+  } catch {}
+
+  // 2. Convert Python-dict single quotes → JSON double quotes
+  try {
+    const jsonified = raw
+      .replace(/'/g, '"')
+      .replace(/\bTrue\b/g, 'true')
+      .replace(/\bFalse\b/g, 'false')
+      .replace(/\bNone\b/g, 'null');
+    const parsed = JSON.parse(jsonified);
+    if (Array.isArray(parsed)) return parsed as FunctionCall[];
+  } catch {}
+
+  return [];
+}
+
+function functionCallToToolCall(fc: FunctionCall): ToolCall {
+  return {
+    id: uuidv4(),
+    name: fc.function,
+    arguments: fc.args ?? {},
+    status: 'pending',
+  };
 }

@@ -1,6 +1,7 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
+apply plugin: "com.chaquo.python"
 
 /**
  * This is the configuration block to customize your React Native Android app.
@@ -84,7 +85,19 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        ndk {
+            // armeabi-v7a (32-bit) cannot reliably mmap a 1 GB model file —
+            // the 3 GB virtual address space is exhausted by OS + app overhead.
+            // arm64-v8a (64-bit) has a 48-bit address space with no such limit.
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags ""
+            }
+        }
     }
+
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -96,6 +109,7 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            debuggable true
         }
         release {
             // Caution! In production, you need to generate your own keystore file.
@@ -105,11 +119,37 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("src/main/jni/CMakeLists.txt")
+        }
+    }
+}
+
+// FIX: Chaquopy 15.0+ uses a top-level `chaquopy {}` block instead of `python {}` nested
+// inside `android {}`. The old `python {}` API was removed in newer AGP/Chaquopy versions.
+chaquopy {
+    defaultConfig {
+        version "3.11"
+        pip {
+            install "pandas"
+            install "numpy"
+        }
+    }
 }
 
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation files('libs/executorch.aar')
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

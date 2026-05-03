@@ -36,10 +36,10 @@ export const AIR_QUALITY_TOOLS: ToolDefinition[] = [
     name: 'load_air_quality_data',
     description: 'Load air quality dataset from local pickle file',
     parameters: {
-      type: 'object',
+      type: 'object' as const,
       properties: {
         dataset_name: {
-          type: 'string',
+          type: 'string' as const,
           description: 'Name of the dataset (e.g., "air_quality_data")',
         },
       },
@@ -50,10 +50,10 @@ export const AIR_QUALITY_TOOLS: ToolDefinition[] = [
     name: 'filter_data',
     description: 'Filter data based on conditions',
     parameters: {
-      type: 'object',
+      type: 'object' as const,
       properties: {
         condition: {
-          type: 'string',
+          type: 'string' as const,
           description: 'Filter condition (e.g., "PM25 > 100")',
         },
       },
@@ -64,10 +64,10 @@ export const AIR_QUALITY_TOOLS: ToolDefinition[] = [
     name: 'compute_statistics',
     description: 'Compute statistics on the data',
     parameters: {
-      type: 'object',
+      type: 'object' as const,
       properties: {
         metric: {
-          type: 'string',
+          type: 'string' as const,
           description: 'Metric to compute (mean, median, std, etc.)',
         },
       },
@@ -78,15 +78,16 @@ export const AIR_QUALITY_TOOLS: ToolDefinition[] = [
     name: 'generate_plot',
     description: 'Generate a visualization plot',
     parameters: {
-      type: 'object',
+      type: 'object' as const,
       properties: {
         plot_type: {
-          type: 'string',
+          type: 'string' as const,
           enum: ['line', 'bar', 'scatter', 'heatmap', 'histogram'],
+          description: 'Type of plot to generate',
         },
         columns: {
-          type: 'array',
-          items: { type: 'string' },
+          type: 'array' as const,
+          items: { type: 'string' as const, description: 'Column name' },
           description: 'Columns to plot',
         },
       },

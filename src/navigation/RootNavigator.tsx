@@ -1,11 +1,11 @@
 import React from 'react';
-import { Text } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import ChatScreen from '../screens/ChatScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import ChatHistoryScreen from '../screens/ChatHistoryScreen';
 import { Colors } from '../theme/colors';
+import { MessageCircle, History, Settings as SettingsIcon } from '../components/icons';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -65,6 +65,11 @@ function SettingsStackNavigator() {
 }
 
 export default function RootNavigator() {
+  const renderTabIcon =
+    (Icon: React.ComponentType<{ size?: number; color?: string; strokeWidth?: number }>) =>
+    ({ color, focused }: { color: string; focused: boolean }) =>
+      <Icon size={20} color={color} strokeWidth={focused ? 2.3 : 2} />;
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -74,6 +79,13 @@ export default function RootNavigator() {
           backgroundColor: Colors.white,
           borderTopColor: Colors.lightGray,
           borderTopWidth: 1,
+          paddingTop: 8,
+          paddingBottom: 10,
+          height: 68,
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          fontWeight: '600',
         },
         headerShown: false,
       }}
@@ -83,9 +95,7 @@ export default function RootNavigator() {
         component={ChatStackNavigator}
         options={{
           tabBarLabel: 'Chat',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 20, color }}>💬</Text>
-          ),
+          tabBarIcon: renderTabIcon(MessageCircle),
         }}
       />
       <Tab.Screen
@@ -93,9 +103,7 @@ export default function RootNavigator() {
         component={HistoryStackNavigator}
         options={{
           tabBarLabel: 'History',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 20, color }}>📋</Text>
-          ),
+          tabBarIcon: renderTabIcon(History),
         }}
       />
       <Tab.Screen
@@ -103,9 +111,7 @@ export default function RootNavigator() {
         component={SettingsStackNavigator}
         options={{
           tabBarLabel: 'Settings',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 20, color }}>⚙️</Text>
-          ),
+          tabBarIcon: renderTabIcon(SettingsIcon),
         }}
       />
     </Tab.Navigator>

@@ -9,6 +9,13 @@ export interface Message {
   metadata?: {
     executionTime?: number;
     plotsCount?: number;
+    inference?: {
+      generationTimeMs: number;
+      timeToFirstTokenMs: number;
+      outputTokens: number;
+      tokensPerSecond: number;
+      promptTokens?: number;
+    };
   };
 }
 

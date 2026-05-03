@@ -28,6 +28,7 @@ export interface TokenizerConfig {
 
 export interface InferenceConfig {
   modelId: string;
+  modelPath?: string;
   tokenizerPath?: string;
   temperature: number;
   topP: number;

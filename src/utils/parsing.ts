@@ -18,7 +18,6 @@ export function extractToolCalls(responseText: string): ToolCall[] {
           name: tc.tool || tc.name || '',
           arguments: tc.args || tc.arguments || {},
           status: 'pending' as const,
-          timestamp: Date.now(),
         }));
       }
     } catch {
@@ -40,7 +39,6 @@ export function extractToolCalls(responseText: string): ToolCall[] {
         name: funcName,
         arguments: typeof args === 'object' ? args : { value: argsStr },
         status: 'pending',
-        timestamp: Date.now(),
       });
     } catch {
       // Skip invalid JSON

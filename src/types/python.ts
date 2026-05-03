@@ -10,8 +10,20 @@ export interface PythonExecutionResponse {
   stderr: string;
   plots: PythonPlot[];
   success: boolean;
-  error?: string;
+  error: string | null;
   executionTime: number;
+}
+
+export interface ExecutionResult extends PythonExecutionResponse {}
+
+export interface ExecutionLog {
+  toolName: string;
+  args: Record<string, unknown>;
+  stdout: string;
+  stderr: string;
+  success: boolean;
+  executionTime: number;
+  plots: PythonPlot[];
 }
 
 export interface PythonPlot {

@@ -1,0 +1,38 @@
+/**
+ * Centralized icon imports from lucide-react-native.
+ * Use named imports throughout the app so Metro can tree-shake unused icons.
+ */
+export {
+  MessageCircle,
+  History,
+  Settings,
+  Cpu,
+  FileText,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Send,
+  User,
+  Bot,
+  Wrench,
+  Code2,
+  AlertCircle,
+  CheckCircle2,
+  X,
+  Wind,
+  Loader2,
+  RefreshCw,
+  Folder,
+  FileJson,
+  Sparkles,
+  Activity,
+  TrendingUp,
+  Copy,
+  Share2,
+  Database,
+  Bug,
+  Table2,
+  Plus,
+  Trash2,
+  Info,
+} from 'lucide-react-native';

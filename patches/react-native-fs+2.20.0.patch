@@ -1,0 +1,53 @@
+diff --git a/node_modules/react-native-fs/android/build.gradle b/node_modules/react-native-fs/android/build.gradle
+index 1234567..abcdefg 100644
+--- a/node_modules/react-native-fs/android/build.gradle
++++ b/node_modules/react-native-fs/android/build.gradle
+@@ -1,35 +1,31 @@
+ def safeExtGet(prop, fallback) {
+     rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+ }
+
+-buildscript {
+-    repositories {
+-        mavenCentral()
+-    }
+-
+-    dependencies {
+-        classpath 'com.android.tools.build:gradle:1.5.0'
+-    }
+-}
+-
++// Removed old buildscript block (classpath 'com.android.tools.build:gradle:1.5.0')
++// AGP version is managed by the root project via @react-native/gradle-plugin.
++
+ apply plugin: 'com.android.library'
+
+ android {
+-    compileSdkVersion safeExtGet('compileSdkVersion', 26)
+-    buildToolsVersion safeExtGet('buildToolsVersion', '26.0.3')
++    // namespace required for AGP 8.x+
++    namespace "com.rnfs"
++
++    compileSdkVersion safeExtGet('compileSdkVersion', 34)
++    buildToolsVersion safeExtGet('buildToolsVersion', '34.0.0')
+
+     defaultConfig {
+-        minSdkVersion safeExtGet('minSdkVersion', 19)
+-        targetSdkVersion safeExtGet('targetSdkVersion', 26)
++        minSdkVersion safeExtGet('minSdkVersion', 24)
++        targetSdkVersion safeExtGet('targetSdkVersion', 34)
+         versionCode 1
+         versionName "1.0"
+     }
+-    lintOptions {
++    // FIX: lintOptions was removed in AGP 8.0 — renamed to lint {}
++    lint {
+         abortOnError false
+     }
+ }
+
+ dependencies {
+-    implementation 'com.facebook.react:react-native:+'
++    // FIX: replaced wildcard 'react-native:+' with the managed artifact
++    implementation("com.facebook.react:react-android")
+ }

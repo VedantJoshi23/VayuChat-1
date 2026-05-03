@@ -38,6 +38,12 @@ export const Typography = StyleSheet.create({
     lineHeight: 20,
     color: Colors.darkGray,
   },
+  button: {
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20,
+    color: Colors.white,
+  },
   label: {
     fontSize: 12,
     fontWeight: '600',

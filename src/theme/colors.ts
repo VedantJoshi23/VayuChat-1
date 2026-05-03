@@ -1,33 +1,55 @@
 export const Colors = {
-  // Primary - Air-inspired palette
-  primary: '#0891b2', // Cyan
-  primaryLight: '#06b6d4', // Light cyan
-  primaryDark: '#0e7490', // Dark cyan
-  secondary: '#14b8a6', // Teal
-  accent: '#06d6a0', // Fresh green
+  // Primary - Fresh Air / Sky
+  primary: '#00AEEF',        // Bright sky blue (clean air)
+  primaryLight: '#33C3FF',  
+  primaryDark: '#007EA7',
 
-  // Neutral
-  white: '#ffffff',
-  offWhite: '#f8f9fa',
-  lightGray: '#f0f1f5',
-  gray: '#d0d5dd',
-  darkGray: '#667085',
-  charcoal: '#1a202c',
+  // Secondary - Nature / Oxygen
+  secondary: '#00C853',      // Vibrant green (good AQI)
+  secondaryLight: '#5EFC82',
+  secondaryDark: '#009624',
+
+  // Accent - Energy / Visibility
+  accent: '#FFD60A',         // Bright yellow (moderate AQI highlight)
+
+  // AQI Scale (core differentiation)
+  aqiGood: '#00E400',        // Green
+  aqiModerate: '#FFFF00',    // Yellow
+  aqiUnhealthySensitive: '#FF7E00', // Orange
+  aqiUnhealthy: '#FF0000',   // Red
+  aqiVeryUnhealthy: '#8F3F97', // Purple
+  aqiHazardous: '#7E0023',   // Maroon
+
+  // Neutrals (slightly cooler toned)
+  white: '#FFFFFF',
+  offWhite: '#E8F5E9',       // Subtle green bluish tint
+  lightGray: '#E6EEF5',
+  gray: '#B0BEC5',
+  darkGray: '#546E7A',
+  charcoal: '#263238',
   black: '#000000',
+  background: '#F4F9FF',
 
-  // Semantic
-  success: '#10b981',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  info: '#3b82f6',
+  // Additional air-themed colors
+  cyan: '#00E5FF',           // Fresh air indicator
+  teal: '#0891b2',           // Air quality theme
 
-  // Transparency
-  overlay: 'rgba(0, 0, 0, 0.5)',
-  overlayLight: 'rgba(255, 255, 255, 0.1)',
+  // Semantic (aligned with AQ theme)
+  success: '#00C853',        // Matches good AQI
+  warning: '#FFB300',        // Strong amber
+  error: '#D32F2F',          // Deep red
+  info: '#29B6F6',           // Light blue (air flow feel)
 
-  // Gradient stops (for future use)
-  gradientStart: '#0891b2',
-  gradientEnd: '#06b6d4',
+  // Atmospheric overlays
+  overlay: 'rgba(0, 0, 0, 0.6)',
+  overlayLight: 'rgba(255, 255, 255, 0.08)',
+
+  // Gradients (more dynamic, less dull)
+  gradientFreshAirStart: '#00E5FF',
+  gradientFreshAirEnd: '#00C853',
+
+  gradientPollutionStart: '#FF7E00',
+  gradientPollutionEnd: '#7E0023',
 };
 
 export const Shadows = {

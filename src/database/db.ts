@@ -1,32 +1,72 @@
-import { openDatabase, Database } from 'react-native-sqlite-storage';
-import { CREATE_TABLES_SQL } from './schema';
+import { Database, appSchema } from '@nozbe/watermelondb';
+import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite';
+import {
+  conversationsSchema,
+  messagesSchema,
+  toolCallsSchema,
+  modelsSchema,
+  executionLogsSchema,
+} from './schema';
+import ConversationModel from './models/ConversationModel';
+import MessageModel from './models/MessageModel';
+import ToolCallModel from './models/ToolCallModel';
+import ModelModel from './models/ModelModel';
+import ExecutionLogModel from './models/ExecutionLogModel';
 
 let db: Database | null = null;
+let initPromise: Promise<Database> | null = null;
+
+const schema = appSchema({
+  version: 1,
+  tables: [
+    conversationsSchema,
+    messagesSchema,
+    toolCallsSchema,
+    modelsSchema,
+    executionLogsSchema,
+  ],
+});
 
 export async function initDatabase(): Promise<Database> {
   if (db) {
     return db;
   }
 
-  return new Promise((resolve, reject) => {
-    const database = openDatabase(
-      {
-        name: 'air_quality_app.db',
-        location: 'default',
-      },
-      () => {
-        database.transaction((tx) => {
-          tx.executeSql(CREATE_TABLES_SQL, [], () => {
-            db = database;
-            resolve(database);
-          });
-        });
-      },
-      (error) => {
-        reject(error);
-      }
-    );
-  });
+  if (initPromise) {
+    return initPromise;
+  }
+
+  initPromise = (async () => {
+    try {
+      const adapter = new SQLiteAdapter({
+        dbName: 'air_quality_app',
+        schema,
+        onSetUpError: (error) => {
+          console.error('WatermelonDB setup error:', error);
+        },
+      });
+
+      db = new Database({
+        adapter,
+        modelClasses: [
+          ConversationModel,
+          MessageModel,
+          ToolCallModel,
+          ModelModel,
+          ExecutionLogModel,
+        ],
+      });
+
+      return db;
+    } catch (error) {
+      initPromise = null;
+      throw new Error(
+        `Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  })();
+
+  return initPromise;
 }
 
 export function getDatabase(): Database {
@@ -38,34 +78,10 @@ export function getDatabase(): Database {
 
 export async function closeDatabase(): Promise<void> {
   if (db) {
-    return new Promise((resolve, reject) => {
-      db!.close(
-        () => {
-          db = null;
-          resolve();
-        },
-        (error) => reject(error)
-      );
+    await db.action(async () => {
+      // Cleanup if needed
     });
+    db = null;
   }
-}
-
-export function executeSql(
-  sql: string,
-  params: (string | number | null)[] = []
-): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const database = getDatabase();
-    database.transaction((tx) => {
-      tx.executeSql(
-        sql,
-        params,
-        (_, result) => resolve(result),
-        (_, error) => {
-          reject(error);
-          return false;
-        }
-      );
-    });
-  });
+  initPromise = null;
 }

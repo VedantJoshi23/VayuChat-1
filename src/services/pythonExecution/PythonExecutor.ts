@@ -1,20 +1,37 @@
-import { PythonExecutionRequest, PythonExecutionResponse, PythonPlot } from '../../types/python';
-import { SecurityPolicy } from './securityPolicy';
+import { NativeModules } from 'react-native';
+import { PythonExecutionRequest, PythonExecutionResponse } from '../../types/python';
+import { SandboxedRunner } from './SandboxedRunner';
+
+const { PythonModule } = NativeModules;
 
 /**
  * Wrapper for Python execution on Android via Chaquopy
- * Will be extended with native module bindings
+ * Uses SandboxedRunner for security and timeout management
  */
 export class PythonExecutor {
   private timeout: number = 10000; // 10 seconds
   private isInitialized = false;
+  private runner: SandboxedRunner;
 
-  async initialize(): Promise<void> {
-    // TODO: Initialize Chaquopy
-    // Check if Chaquopy is available via native module
-    this.isInitialized = true;
+  constructor(timeoutMs: number = 10000) {
+    this.timeout = timeoutMs;
+    this.runner = new SandboxedRunner(timeoutMs);
   }
 
+  async initialize(): Promise<void> {
+    if (!PythonModule) {
+      throw new Error('PythonModule native module not available');
+    }
+
+    // Chaquopy is initialized automatically by Android
+    // This method is just for completeness
+    this.isInitialized = true;
+    console.log('PythonExecutor initialized');
+  }
+
+  /**
+   * Execute Python code with security validation and timeout
+   */
   async execute(
     request: PythonExecutionRequest
   ): Promise<PythonExecutionResponse> {
@@ -22,66 +39,65 @@ export class PythonExecutor {
       throw new Error('PythonExecutor not initialized');
     }
 
-    // Validate code before execution
-    const validation = SecurityPolicy.validateCode(request.code);
-    if (!validation.valid) {
-      return {
-        stdout: '',
-        stderr: validation.errors.join('\n'),
-        plots: [],
-        success: false,
-        error: 'Code validation failed',
-        executionTime: 0,
-      };
-    }
-
     try {
-      // TODO: Call actual Chaquopy execution
-      // For now, mock implementation
-      const startTime = Date.now();
+      // Use SandboxedRunner for validation, safety wrapping, and timeout
+      const result = await this.runner.run(request);
 
-      const result = await this.mockExecute(request.code);
-
-      const executionTime = Date.now() - startTime;
-
-      return {
-        stdout: result.stdout,
-        stderr: result.stderr,
-        plots: result.plots,
-        success: result.stderr === '',
-        error: result.stderr || null,
-        executionTime,
-      };
+      return result;
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       return {
         stdout: '',
-        stderr: (error as Error).message,
+        stderr: errorMsg,
         plots: [],
         success: false,
-        error: (error as Error).message,
+        error: errorMsg,
         executionTime: 0,
       };
     }
   }
 
   /**
-   * Mock execution for testing
-   * TODO: Replace with actual Chaquopy integration
+   * Execute and stream results (when Chaquopy fully integrated)
    */
-  private async mockExecute(
-    code: string
-  ): Promise<{ stdout: string; stderr: string; plots: PythonPlot[] }> {
-    return {
-      stdout: 'Code executed (mock)',
-      stderr: '',
-      plots: [],
+  async executeWithCallback(
+    code: string,
+    onStdout?: (line: string) => void,
+    onStderr?: (line: string) => void
+  ): Promise<PythonExecutionResponse> {
+    const request: PythonExecutionRequest = {
+      code,
+      timeout: this.timeout,
     };
+
+    return this.execute(request);
   }
 
+  /**
+   * Check if Python module is available
+   */
   isReady(): boolean {
-    return this.isInitialized;
+    return this.isInitialized && PythonModule !== undefined;
   }
 
+  /**
+   * Get current timeout
+   */
+  getTimeout(): number {
+    return this.timeout;
+  }
+
+  /**
+   * Set execution timeout
+   */
+  setTimeout(ms: number): void {
+    this.timeout = ms;
+    this.runner.setTimeout(ms);
+  }
+
+  /**
+   * Clean up resources
+   */
   destroy(): void {
     this.isInitialized = false;
   }
