@@ -253,19 +253,17 @@ export default function ChatScreen({ navigation }: any) {
       ),
       headerRight: () => (
         <View style={styles.headerRight}>
-          {mode === 'tool_calling' && (
-            <TouchableOpacity
-              onPress={() => setDatasetPickerOpen(true)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              style={[styles.datasetBtn, datasets.length > 0 && styles.datasetBtnActive]}
-            >
-              <Database
-                size={18}
-                color={datasets.length > 0 ? Colors.primary : Colors.darkGray}
-                strokeWidth={2}
-              />
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            onPress={() => setDatasetPickerOpen(true)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={[styles.datasetBtn, datasets.length > 0 && styles.datasetBtnActive]}
+          >
+            <Database
+              size={18}
+              color={datasets.length > 0 ? Colors.primary : Colors.darkGray}
+              strokeWidth={2}
+            />
+          </TouchableOpacity>
           <ModeSelector variant="compact" />
         </View>
       ),
@@ -456,9 +454,7 @@ export default function ChatScreen({ navigation }: any) {
           }
           placeholder={
             llmEngine.isReady
-              ? mode === 'tool_calling' && datasets.length === 0
-                ? 'Load a dataset first (tap the table icon above)…'
-                : 'Ask about air quality…'
+              ? 'Ask about air quality…'
               : llmEngine.error
               ? 'Model failed to load'
               : 'Loading model…'

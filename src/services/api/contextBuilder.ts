@@ -114,41 +114,59 @@ Example — "Which city had the highest PM2.5 in 2024?":
 }
 
 /**
- * Builds a system prompt for direct inference mode (code generation)
+ * Builds a system prompt for direct inference mode (code generation).
+ *
+ * When `tables` are provided the prompt includes their schema so the model
+ * can write correct, column-aware Python code referencing those datasets.
+ * The tool-calling function-call format is deliberately NOT mentioned here —
+ * the model should produce free-form code or prose, not <function_calls> XML.
  */
-export function buildDirectInferenceSystemPrompt(): string {
-  return `You are an expert Python data analyst specializing in air quality analysis.
+export function buildDirectInferenceSystemPrompt(tables: TableSchema[] = []): string {
+  const datasetSection =
+    tables.length > 0
+      ? `\nLoaded datasets (available as pandas DataFrames):\n${tables
+          .map(
+            (t) =>
+              `  - "${t.name}": ${t.rowCount.toLocaleString()} rows, columns: [${t.columns.join(', ')}]`
+          )
+          .join('\n')}\n\nReference these datasets by name in your code. ` +
+        `Assume each table is already loaded as a DataFrame named after the table ` +
+        `(e.g. \`${tables[0]?.name ?? 'data'} = pd.read_pickle("${tables[0]?.name ?? 'data'}.pkl")\` ` +
+        `is pre-loaded for you).\n`
+      : '';
 
+  return `You are an expert Python data analyst specializing in air quality analysis.
+${datasetSection}
 You have access to:
 - pandas (pd) - Data manipulation
 - numpy (np) - Numerical computing
 - matplotlib (plt) - Visualization
-- air quality datasets in common formats
 
 When the user asks a question about air quality:
 1. Write Python code to analyze the data
 2. Generate visualizations where appropriate
-3. Provide insights based on the analysis
+3. Provide clear insights based on the analysis
 
 Guidelines:
-- Start with loading/preparing data
-- Use clear variable names
-- Add comments explaining the analysis
-- Generate plots for key findings
-- Handle missing data gracefully
+- Use the exact column names from the schema above
+- Handle missing/NaN values gracefully (dropna or fillna)
+- Add brief comments explaining each step
+- Keep code concise and correct
 
-Example:
+Example (if "main_data" were loaded):
 \`\`\`python
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Load air quality data
-df = pd.read_csv('air_quality.csv')
-
-# Analyze PM2.5 trends
-monthly_pm25 = df.groupby('month')['pm25'].mean()
-monthly_pm25.plot(kind='bar')
-plt.title('Monthly PM2.5 Levels')
+# Analyse PM2.5 by city
+top_cities = (
+    main_data.groupby("City")["PM2.5 (µg/m³)"]
+    .mean()
+    .sort_values(ascending=False)
+    .head(10)
+)
+top_cities.plot(kind="bar", title="Top 10 Cities by Mean PM2.5")
+plt.tight_layout()
 plt.show()
 \`\`\``;
 }

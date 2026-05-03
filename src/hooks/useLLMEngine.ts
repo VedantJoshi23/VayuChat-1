@@ -259,7 +259,7 @@ export function useLLMEngine(modelPath: string | null) {
       const systemPrompt =
         mode === 'tool_calling'
           ? buildToolCallingSystemPrompt(tableSchemas ?? [])
-          : buildDirectInferenceSystemPrompt();
+          : buildDirectInferenceSystemPrompt(tableSchemas ?? []);
 
       const conversationWithSystem: Conversation = { ...conversation, systemPrompt };
 
