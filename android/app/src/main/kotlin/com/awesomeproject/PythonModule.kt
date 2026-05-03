@@ -105,76 +105,61 @@ class PythonModule(private val reactContext: ReactApplicationContext) :
      *
      * Uses pandas; datetime64 columns are serialised as YYYY-MM-DD strings.
      *
-     * Instead of redirecting sys.stdout (which is not thread-safe when
-     * multiple coroutines share the same Python interpreter), we write the
-     * result into a variable in the __main__ namespace and read it back
-     * directly via Chaquopy's PyObject API.  This avoids the race condition
-     * where concurrent calls could overwrite each other's captured output.
+     * Approach: define a uniquely-named Python function in __main__ and call
+     * it via module.callAttr().  The return value travels back to Kotlin as a
+     * PyObject (Python str) without touching sys.stdout at all.  This is
+     * thread-safe: concurrent invocations each define their own function with a
+     * timestamp-based name and clean it up when done.
      */
     @ReactMethod
     fun loadPickleAsJson(filePath: String, promise: Promise) {
         scope.launch {
+            val funcName = "_pkl_${System.nanoTime()}"
             try {
                 ensurePythonStarted()
-                val py = Python.getInstance()
+                val py   = Python.getInstance()
                 val main = py.getModule("__main__")
-
-                // Use a unique result key per call so concurrent invocations
-                // don't collide in the shared __main__ namespace.
-                val resultKey = "__pkl_result_${System.nanoTime()}__"
-                val errorKey  = "__pkl_error_${System.nanoTime()}__"
 
                 val escapedPath = filePath.replace("\\", "\\\\").replace("'", "\\'")
 
-                // Write result/error into __main__ variables; never touch sys.stdout.
+                // Define a function that loads the pickle and returns JSON.
+                // Using a function return value avoids any stdout/stderr capture.
                 val code = """
-import pandas as pd, json as _json
-
-try:
-    _df = pd.read_pickle('$escapedPath')
-    if not isinstance(_df, pd.DataFrame):
-        raise ValueError(f"Expected DataFrame, got {type(_df).__name__}")
-
-    # Normalise datetime columns so JSON serialiser doesn't choke
-    for _col in _df.select_dtypes(include=['datetime64', 'datetimetz']).columns:
-        _df[_col] = _df[_col].dt.strftime('%Y-%m-%d')
-
-    # Replace NaN/NaT/inf with None for valid JSON
-    _df = _df.where(pd.notnull(_df), None)
-    globals()['$resultKey'] = _json.dumps(
-        _df.to_dict(orient='records'), default=str
-    )
-    globals()['$errorKey'] = None
-except Exception as _e:
-    globals()['$resultKey'] = None
-    globals()['$errorKey'] = str(_e)
+def $funcName():
+    import pandas as pd, json
+    df = pd.read_pickle('$escapedPath')
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError(f"Expected DataFrame, got {type(df).__name__}")
+    for col in df.select_dtypes(include=['datetime64', 'datetimetz']).columns:
+        df[col] = df[col].dt.strftime('%Y-%m-%d')
+    df = df.where(pd.notnull(df), None)
+    return json.dumps(df.to_dict(orient='records'), default=str)
 """.trimIndent()
 
-                py.builtins.callAttr("exec", code, main.asDict())
+                // exec() without explicit globals runs in __main__'s namespace
+                // in Chaquopy, so the function becomes accessible as main.funcName().
+                py.builtins.callAttr("exec", code)
 
-                val pyError = main[errorKey]?.toString()
-                val out     = main[resultKey]?.toString()
+                val result = main.callAttr(funcName)?.toString() ?: ""
 
-                // Clean up temporary globals
-                try { py.builtins.callAttr("exec", "del globals()['$resultKey'], globals()['$errorKey']", main.asDict()) } catch (_: Exception) {}
-
-                when {
-                    pyError != null -> {
-                        Log.e(TAG, "loadPickleAsJson python error: $pyError")
-                        promise.reject("PKL_LOAD_ERROR", pyError)
-                    }
-                    out.isNullOrEmpty() -> {
-                        Log.e(TAG, "loadPickleAsJson: empty result for $filePath")
-                        promise.reject("PKL_LOAD_ERROR", "Pickle produced an empty result")
-                    }
-                    else -> {
-                        Log.d(TAG, "loadPickleAsJson: success, ${out.length} chars")
-                        promise.resolve(out)
-                    }
+                if (result.isEmpty()) {
+                    Log.e(TAG, "loadPickleAsJson: empty result for $filePath")
+                    promise.reject("PKL_LOAD_ERROR", "Pickle produced an empty result")
+                } else {
+                    Log.d(TAG, "loadPickleAsJson: success, ${result.length} chars")
+                    promise.resolve(result)
                 }
+            } catch (e: PyException) {
+                Log.e(TAG, "loadPickleAsJson Python error: ${e.message}", e)
+                promise.reject("PKL_LOAD_ERROR", e.message ?: "Python error loading pickle")
             } catch (e: Exception) {
                 Log.e(TAG, "loadPickleAsJson error: ${e.message}", e)
                 promise.reject("PKL_LOAD_ERROR", e.message ?: "Unknown error")
+            } finally {
+                // Best-effort cleanup: remove the temp function from __main__
+                try {
+                    Python.getInstance().builtins.callAttr("exec", "del $funcName")
+                } catch (_: Exception) {}
             }
         }
     }
