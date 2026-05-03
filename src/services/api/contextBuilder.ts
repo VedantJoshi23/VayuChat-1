@@ -1,5 +1,6 @@
 import { Message, Conversation } from '../../types/chat';
 import { tokenizerRegistry } from '../llmEngine/tokenizerRegistry';
+import type { RNLlamaOAICompatibleMessage } from '../llmEngine/llamaRNBridge';
 
 export interface ContextBuildOptions {
   maxContextMessages?: number;
@@ -150,6 +151,49 @@ monthly_pm25.plot(kind='bar')
 plt.title('Monthly PM2.5 Levels')
 plt.show()
 \`\`\``;
+}
+
+/**
+ * Builds an OpenAI-compatible message array for use with llama.rn's
+ * `getFormattedChat()` / `generateChat()`.  This lets the model apply its
+ * own Jinja chat template instead of the hand-crafted raw-string format.
+ */
+export function buildOAIMessages(
+  userQuery: string,
+  messages: Message[],
+  conversation: Conversation,
+  opts: ContextBuildOptions = {}
+): RNLlamaOAICompatibleMessage[] {
+  const merged = { ...DEFAULT_OPTIONS, ...opts };
+
+  // Trim history to fit context budget (same logic as buildContextPrompt)
+  let history = messages;
+  if (merged.maxContextMessages && history.length > merged.maxContextMessages) {
+    history = history.slice(-merged.maxContextMessages);
+  }
+  if (merged.maxContextTokens) {
+    history = tokenizerRegistry.trimMessagesToFit(
+      history,
+      merged.maxContextTokens,
+      merged.reserveForResponse
+    );
+  }
+
+  const result: RNLlamaOAICompatibleMessage[] = [];
+
+  if (merged.includeSystemPrompt && conversation.systemPrompt) {
+    result.push({ role: 'system', content: conversation.systemPrompt });
+  }
+
+  for (const msg of history) {
+    if (msg.role === 'user' || msg.role === 'assistant') {
+      result.push({ role: msg.role, content: msg.content });
+    }
+  }
+
+  result.push({ role: 'user', content: userQuery });
+
+  return result;
 }
 
 /**

@@ -102,56 +102,75 @@ class PythonModule(private val reactContext: ReactApplicationContext) :
 
     /**
      * Load a .pkl file and return its rows as a JSON array string.
-     * Uses pandas; datetime columns are converted to YYYY-MM-DD strings.
+     *
+     * Uses pandas; datetime64 columns are serialised as YYYY-MM-DD strings.
+     *
+     * Instead of redirecting sys.stdout (which is not thread-safe when
+     * multiple coroutines share the same Python interpreter), we write the
+     * result into a variable in the __main__ namespace and read it back
+     * directly via Chaquopy's PyObject API.  This avoids the race condition
+     * where concurrent calls could overwrite each other's captured output.
      */
     @ReactMethod
     fun loadPickleAsJson(filePath: String, promise: Promise) {
         scope.launch {
             try {
                 ensurePythonStarted()
+                val py = Python.getInstance()
+                val main = py.getModule("__main__")
 
-                // Build code with the file path safely interpolated (no user input, just a path)
+                // Use a unique result key per call so concurrent invocations
+                // don't collide in the shared __main__ namespace.
+                val resultKey = "__pkl_result_${System.nanoTime()}__"
+                val errorKey  = "__pkl_error_${System.nanoTime()}__"
+
                 val escapedPath = filePath.replace("\\", "\\\\").replace("'", "\\'")
+
+                // Write result/error into __main__ variables; never touch sys.stdout.
                 val code = """
-import pandas as pd, json
+import pandas as pd, json as _json
 
-df = pd.read_pickle('$escapedPath')
-if not isinstance(df, pd.DataFrame):
-    raise ValueError(f"Expected DataFrame, got {type(df).__name__}")
+try:
+    _df = pd.read_pickle('$escapedPath')
+    if not isinstance(_df, pd.DataFrame):
+        raise ValueError(f"Expected DataFrame, got {type(_df).__name__}")
 
-for col in df.select_dtypes(include='datetime64').columns:
-    df[col] = df[col].dt.strftime('%Y-%m-%d')
+    # Normalise datetime columns so JSON serialiser doesn't choke
+    for _col in _df.select_dtypes(include=['datetime64', 'datetimetz']).columns:
+        _df[_col] = _df[_col].dt.strftime('%Y-%m-%d')
 
-print(json.dumps(df.where(pd.notnull(df), None).to_dict(orient='records'), default=str))
+    # Replace NaN/NaT/inf with None for valid JSON
+    _df = _df.where(pd.notnull(_df), None)
+    globals()['$resultKey'] = _json.dumps(
+        _df.to_dict(orient='records'), default=str
+    )
+    globals()['$errorKey'] = None
+except Exception as _e:
+    globals()['$resultKey'] = None
+    globals()['$errorKey'] = str(_e)
 """.trimIndent()
 
-                val py = Python.getInstance()
-                val io = py.getModule("io")
-                val sys = py.getModule("sys")
+                py.builtins.callAttr("exec", code, main.asDict())
 
-                val stdout = io.callAttr("StringIO")
-                val stderrIo = io.callAttr("StringIO")
-                sys["stdout"] = stdout
-                sys["stderr"] = stderrIo
+                val pyError = main[errorKey]?.toString()
+                val out     = main[resultKey]?.toString()
 
-                var pyError: String? = null
-                try {
-                    py.builtins.callAttr("exec", code)
-                } catch (e: PyException) {
-                    pyError = e.message ?: "Python error"
-                    Log.w(TAG, "loadPickleAsJson PyException: $pyError")
-                }
+                // Clean up temporary globals
+                try { py.builtins.callAttr("exec", "del globals()['$resultKey'], globals()['$errorKey']", main.asDict()) } catch (_: Exception) {}
 
-                val out = stdout.callAttr("getvalue").toString().trim()
-                val err = listOfNotNull(
-                    stderrIo.callAttr("getvalue").toString().takeIf { it.isNotEmpty() },
-                    pyError
-                ).joinToString("\n").trim()
-
-                if (pyError != null || out.isEmpty()) {
-                    promise.reject("PKL_LOAD_ERROR", err.ifEmpty { "No output from Python" })
-                } else {
-                    promise.resolve(out)
+                when {
+                    pyError != null -> {
+                        Log.e(TAG, "loadPickleAsJson python error: $pyError")
+                        promise.reject("PKL_LOAD_ERROR", pyError)
+                    }
+                    out.isNullOrEmpty() -> {
+                        Log.e(TAG, "loadPickleAsJson: empty result for $filePath")
+                        promise.reject("PKL_LOAD_ERROR", "Pickle produced an empty result")
+                    }
+                    else -> {
+                        Log.d(TAG, "loadPickleAsJson: success, ${out.length} chars")
+                        promise.resolve(out)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "loadPickleAsJson error: ${e.message}", e)

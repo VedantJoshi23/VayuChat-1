@@ -1,16 +1,28 @@
 import { Response, StreamEvent } from '../../types/common';
 import { InferenceConfig } from '../../types/models';
+import type { RNLlamaOAICompatibleMessage } from './llamaRNBridge';
 
 export interface LLMEngine {
   initialize(config: InferenceConfig): Promise<void>;
 
   /**
-   * Generate a response from a fully-built prompt.
-   * Prompt assembly (system prompt + history + query) is owned by the
-   * orchestration layer (`useLLMEngine` + `contextBuilder`), not the engine.
+   * Generate from a pre-built raw prompt string.
+   * Used for PTE/ExecuTorch models and as a fallback when chat-template
+   * formatting is unavailable.
    */
   generate(
     prompt: string,
+    onStream: (event: StreamEvent) => void,
+    abortSignal?: AbortSignal
+  ): Promise<Response>;
+
+  /**
+   * Generate using the model's embedded chat template (GGUF only).
+   * Preferred over `generate()` — avoids the wrong-format / single-token bug.
+   * Engines that don't support this leave it undefined.
+   */
+  generateWithMessages?(
+    messages: RNLlamaOAICompatibleMessage[],
     onStream: (event: StreamEvent) => void,
     abortSignal?: AbortSignal
   ): Promise<Response>;

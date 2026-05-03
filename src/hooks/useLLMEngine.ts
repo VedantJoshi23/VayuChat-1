@@ -6,10 +6,11 @@ import { LLMEngine, BaseLLMEngine } from '../services/llmEngine/LLMEngine';
 import { ModelLoader } from '../services/llmEngine/modelLoader';
 import * as llamaRNBridge from '../services/llmEngine/llamaRNBridge';
 import { Message, Conversation } from '../types/chat';
-import { Response } from '../types/common';
+import { Response, StreamEvent } from '../types/common';
 import { InferenceConfig } from '../types/models';
 import {
   buildContextPrompt,
+  buildOAIMessages,
   buildToolCallingSystemPrompt,
   buildDirectInferenceSystemPrompt,
   TableSchema,
@@ -262,14 +263,13 @@ export function useLLMEngine(modelPath: string | null) {
 
       const conversationWithSystem: Conversation = { ...conversation, systemPrompt };
 
-      const fullPrompt = buildContextPrompt(userQuery, messages, conversationWithSystem, {
+      const ctxOpts = {
         includeSystemPrompt: true,
         maxContextMessages: 20,
         maxContextTokens: selectedModel?.contextWindow
           ? selectedModel.contextWindow - 512
           : 2048,
-      });
-      const promptTokens = tokenizerRegistry.estimatePromptTokens(fullPrompt);
+      };
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -277,75 +277,95 @@ export function useLLMEngine(modelPath: string | null) {
 
       setState((prev) => ({ ...prev, isGenerating: true, error: null }));
 
+      const onStreamEvent = (event: StreamEvent) => {
+        if (event.type === 'token') onToken(event.content);
+      };
+
       try {
-        // Capture the engine ref once — prevents null-dereference if a concurrent
-        // retryLoad() clears engineRef.current mid-flight.
         const activeEngine = engineRef.current;
         if (!activeEngine) throw new Error('Engine was unloaded before generation could start.');
 
-        const runGeneration = () =>
-          activeEngine.generate(
-            fullPrompt,
-            (event) => {
-              if (event.type === 'token') onToken(event.content);
-            },
+        const modelFormat = modelPath ? ModelLoader.getModelFormat(modelPath) : 'unknown';
+        const isPTE = modelFormat === 'pte';
+
+        let response: Response;
+
+        if (!isPTE && activeEngine.generateWithMessages) {
+          // ── GGUF path: use the model's embedded chat template ─────────────
+          // Correct prompt formatting prevents the model from immediately
+          // generating its EOS token (the "one token in 68 s" bug).
+          const oaiMessages = buildOAIMessages(
+            userQuery,
+            messages,
+            conversationWithSystem,
+            ctxOpts
+          );
+          response = await activeEngine.generateWithMessages(
+            oaiMessages,
+            onStreamEvent,
             ctrl.signal
           );
+        } else {
+          // ── PTE path: raw prompt (ExecuTorch doesn't use chat templates) ──
+          const fullPrompt = buildContextPrompt(
+            userQuery,
+            messages,
+            conversationWithSystem,
+            ctxOpts
+          );
+          response = await activeEngine.generate(fullPrompt, onStreamEvent, ctrl.signal);
+        }
 
-        let response = await runGeneration();
-
-        // Auto-reload llama.rn if bridge was evicted between requests (GGUF only)
-        if (
-          !response.content &&
-          modelPath &&
-          ModelLoader.getModelFormat(modelPath) !== 'pte' &&
-          !llamaRNBridge.isLoaded()
-        ) {
+        // Auto-reload llama.rn bridge if evicted between requests (GGUF only)
+        if (!response.content && !isPTE && modelPath && !llamaRNBridge.isLoaded()) {
           await llamaRNBridge.loadModel(modelPath, {
-            numThreads: 4,
+            numThreads: 6,
             contextWindow: selectedModel?.contextWindow ?? 2048,
           });
-          response = await runGeneration();
+          // Re-run with same path
+          if (!isPTE && activeEngine.generateWithMessages) {
+            const oaiMessages = buildOAIMessages(userQuery, messages, conversationWithSystem, ctxOpts);
+            response = await activeEngine.generateWithMessages(oaiMessages, onStreamEvent, ctrl.signal);
+          } else {
+            const fullPrompt = buildContextPrompt(userQuery, messages, conversationWithSystem, ctxOpts);
+            response = await activeEngine.generate(fullPrompt, onStreamEvent, ctrl.signal);
+          }
         }
 
-        if (response?.metrics) {
-          response.metrics.promptTokens = promptTokens;
-        }
+        const promptTokens = tokenizerRegistry.estimatePromptTokens(
+          buildContextPrompt(userQuery, messages, conversationWithSystem, ctxOpts)
+        );
+        if (response?.metrics) response.metrics.promptTokens = promptTokens;
+
         setState((prev) => ({ ...prev, isGenerating: false }));
         return response;
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Generation failed';
+        const isGGUF = modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte';
 
         // One-shot reload for transient GGUF "model not loaded" errors
-        const isGGUF = modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte';
-        if (
-          isGGUF &&
-          modelPath &&
-          (message.includes('Model not loaded') || message.includes('not initialized'))
-        ) {
+        if (isGGUF && modelPath && (message.includes('Model not loaded') || message.includes('not initialized'))) {
           try {
             await llamaRNBridge.loadModel(modelPath, {
-              numThreads: 4,
+              numThreads: 6,
               contextWindow: selectedModel?.contextWindow ?? 2048,
             });
-            // Re-capture engine ref after the await
-            const activeEngine = engineRef.current;
-            if (!activeEngine) throw new Error('Engine unavailable after reload.');
-            const retryResponse = await activeEngine.generate(
-              fullPrompt,
-              (event) => {
-                if (event.type === 'token') onToken(event.content);
-              },
-              ctrl.signal
-            );
-            if (retryResponse?.metrics) {
-              retryResponse.metrics.promptTokens = promptTokens;
+            const retryEngine = engineRef.current;
+            if (!retryEngine) throw new Error('Engine unavailable after reload.');
+
+            let retryResponse: Response;
+            if (retryEngine.generateWithMessages) {
+              const oaiMessages = buildOAIMessages(userQuery, messages, conversationWithSystem, ctxOpts);
+              retryResponse = await retryEngine.generateWithMessages(oaiMessages, onStreamEvent, ctrl.signal);
+            } else {
+              const fullPrompt = buildContextPrompt(userQuery, messages, conversationWithSystem, ctxOpts);
+              retryResponse = await retryEngine.generate(fullPrompt, onStreamEvent, ctrl.signal);
             }
+
             setState((prev) => ({ ...prev, isGenerating: false, error: null }));
             return retryResponse;
           } catch (retryError) {
-            const retryMsg =
-              retryError instanceof Error ? retryError.message : 'Generation failed';
+            const retryMsg = retryError instanceof Error ? retryError.message : 'Generation failed';
             setState((prev) => ({ ...prev, isGenerating: false, error: retryMsg }));
             throw retryError;
           }
