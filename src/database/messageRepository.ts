@@ -75,6 +75,7 @@ export class MessageRepository {
   async deleteMessage(id: string): Promise<void> {
     const db = getDatabase();
     const msg = await db.collections.get<MessageModel>('messages').find(id);
+    if (!msg) return;
 
     await db.write(async () => {
       await msg.destroyPermanently();

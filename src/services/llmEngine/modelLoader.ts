@@ -72,7 +72,7 @@ export class ModelLoader {
       }
 
       const stat = await RNFS.stat(modelPath);
-      if (!stat.isFile) {
+      if (!stat.isFile()) {
         throw new Error(`Path is not a file: ${modelPath}`);
       }
 

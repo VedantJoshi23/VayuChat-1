@@ -40,7 +40,11 @@ export class NativeInferenceEngine extends BaseLLMEngine {
       );
     }
 
-    await super.initialize(config);
+    // Store config but keep isInitialized = false until the native load succeeds.
+    // super.initialize() would flip isInitialized → true prematurely, so we
+    // call it after the load succeeds to avoid isReady() returning true on a
+    // partially-initialized engine.
+    this.config = config;
     this.emitter = new NativeEventEmitter(LLMModule);
 
     const temperature = config.temperature ?? 0.8;
@@ -53,15 +57,23 @@ export class NativeInferenceEngine extends BaseLLMEngine {
         temperature
       );
     } catch (e: any) {
-      this.isInitialized = false;
+      // Clean up emitter before re-throwing so there's no dangling listener
+      this.emitter.removeAllListeners('onToken');
+      this.emitter.removeAllListeners('onModelLoaded');
+      this.emitter = null;
       const detail = e?.message ?? String(e);
       throw new Error(`PTE model load failed: ${detail}`);
     }
 
     if (!success) {
-      this.isInitialized = false;
+      this.emitter.removeAllListeners('onToken');
+      this.emitter.removeAllListeners('onModelLoaded');
+      this.emitter = null;
       throw new Error(`PTE model load failed (loadModel returned false).`);
     }
+
+    // Native load confirmed — mark as ready
+    this.isInitialized = true;
   }
 
   async generate(

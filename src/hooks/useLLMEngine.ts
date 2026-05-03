@@ -18,13 +18,38 @@ import { useSettingsStore } from '../store/settingsStore';
 import { useModelStore } from '../store/modelStore';
 import { tokenizerRegistry } from '../services/llmEngine/tokenizerRegistry';
 
-const MODEL_LOAD_TIMEOUT_MS = 60_000; // 60 s — PTE can be slow to mmap
+const MODEL_LOAD_TIMEOUT_MS = 60_000;
 
 interface UseLLMEngineState {
   isReady: boolean;
   isGenerating: boolean;
   error: string | null;
   engine: LLMEngine | null;
+}
+
+/**
+ * Races `promise` against a timeout. The timer is always cleared after the
+ * race settles so it never fires later and creates an orphaned rejected
+ * Promise (which Hermes treats as fatal in release builds).
+ *
+ * The underlying `promise` may still be pending after the timeout wins — we
+ * attach a no-op `.catch()` so that if it eventually rejects it is silently
+ * swallowed rather than becoming another unhandled rejection.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout>;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(new Error(message)), ms);
+  });
+
+  // Swallow any late rejection from the original promise so it never becomes
+  // an unhandled rejection after the timeout has already won the race.
+  promise.catch(() => undefined);
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timerId);
+  }) as Promise<T>;
 }
 
 export function useLLMEngine(modelPath: string | null) {
@@ -54,7 +79,7 @@ export function useLLMEngine(modelPath: string | null) {
         abortRef.current = null;
       }
 
-      // Unload previous engine first
+      // Unload previous engine
       const prevEngine = engineRef.current;
       engineRef.current = null;
       if (prevEngine) {
@@ -75,8 +100,11 @@ export function useLLMEngine(modelPath: string | null) {
       const initAbort = new AbortController();
       abortRef.current = initAbort;
 
+      // Tracks an engine that started initializing but may not yet be assigned
+      // to engineRef — needed so we can clean it up if init fails mid-way.
+      let engineInProgress: BaseLLMEngine | null = null;
+
       try {
-        // Validate the file exists and get format
         await ModelLoader.loadModel(modelPath);
         const modelFormat = ModelLoader.getModelFormat(modelPath);
 
@@ -85,7 +113,10 @@ export function useLLMEngine(modelPath: string | null) {
         }
 
         const config: InferenceConfig = {
-          modelId: selectedModel?.id ?? modelPath.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'unknown',
+          modelId:
+            selectedModel?.id ??
+            modelPath.split('/').pop()?.replace(/\.[^.]+$/, '') ??
+            'unknown',
           modelPath,
           tokenizerPath: selectedTokenizerPath ?? selectedModel?.tokenizerPath,
           temperature: selectedModel?.temperature ?? 0.7,
@@ -96,23 +127,14 @@ export function useLLMEngine(modelPath: string | null) {
           streamTokens: true,
         };
 
-        // Choose the correct loading strategy
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Model loading timed out after ${MODEL_LOAD_TIMEOUT_MS / 1000}s`)),
-            MODEL_LOAD_TIMEOUT_MS
-          )
-        );
-
         if (modelFormat === 'pte') {
-          // ── ExecuTorch PTE path ──────────────────────────────────────────
+          // ── ExecuTorch PTE path ─────────────────────────────────────────
           if (!isNativeInferenceAvailable()) {
             throw new Error(
               'PTE inference requires Android with the ExecuTorch AAR. ' +
                 'This device/build does not support it.'
             );
           }
-
           if (!config.tokenizerPath) {
             throw new Error(
               'A tokenizer file is required to load a .pte model. ' +
@@ -121,7 +143,15 @@ export function useLLMEngine(modelPath: string | null) {
           }
 
           const nativeEngine = new NativeInferenceEngine();
-          await Promise.race([nativeEngine.initialize(config), timeoutPromise]);
+          engineInProgress = nativeEngine;
+
+          await withTimeout(
+            nativeEngine.initialize(config),
+            MODEL_LOAD_TIMEOUT_MS,
+            `Model loading timed out after ${MODEL_LOAD_TIMEOUT_MS / 1000}s`
+          );
+
+          engineInProgress = null;
 
           if (initAbort.signal.aborted || !mounted) {
             nativeEngine.unload().catch(() => undefined);
@@ -138,21 +168,24 @@ export function useLLMEngine(modelPath: string | null) {
           return;
         }
 
-        // ── GGUF path (llama.rn) ─────────────────────────────────────────
-        await Promise.race([
+        // ── GGUF path (llama.rn) ────────────────────────────────────────
+        await withTimeout(
           llamaRNBridge.loadModel(modelPath, {
             numThreads: 4,
             contextWindow: config.contextWindow,
           }),
-          timeoutPromise,
-        ]);
+          MODEL_LOAD_TIMEOUT_MS,
+          `Model loading timed out after ${MODEL_LOAD_TIMEOUT_MS / 1000}s`
+        );
 
         if (initAbort.signal.aborted || !mounted) return;
 
         const engine: BaseLLMEngine =
           mode === 'tool_calling' ? new ToolCallingEngine() : new DirectInferenceEngine();
 
+        engineInProgress = engine;
         await engine.initialize(config);
+        engineInProgress = null;
 
         if (initAbort.signal.aborted || !mounted) {
           engine.unload().catch(() => undefined);
@@ -167,12 +200,17 @@ export function useLLMEngine(modelPath: string | null) {
           engine: engine as LLMEngine,
         });
       } catch (e) {
+        // Clean up any partially-initialized engine
+        if (engineInProgress) {
+          engineInProgress.unload().catch(() => undefined);
+          engineInProgress = null;
+        }
+
         if (initAbort.signal.aborted || !mounted) return;
 
         const msg = e instanceof Error ? e.message : 'Failed to initialize engine';
         console.error('[useLLMEngine] init error:', msg);
 
-        // Reset engine state cleanly on failure
         engineRef.current = null;
         setState({ isReady: false, isGenerating: false, error: msg, engine: null });
       } finally {
@@ -207,7 +245,6 @@ export function useLLMEngine(modelPath: string | null) {
       onToken: (token: string) => void,
       tableSchemas?: TableSchema[]
     ): Promise<Response | null> => {
-      // Wait for in-flight init if needed
       if (!state.isReady || !engineRef.current) {
         if (initPromiseRef.current) {
           await initPromiseRef.current;
@@ -228,11 +265,12 @@ export function useLLMEngine(modelPath: string | null) {
       const fullPrompt = buildContextPrompt(userQuery, messages, conversationWithSystem, {
         includeSystemPrompt: true,
         maxContextMessages: 20,
-        maxContextTokens: selectedModel?.contextWindow ? selectedModel.contextWindow - 512 : 2048,
+        maxContextTokens: selectedModel?.contextWindow
+          ? selectedModel.contextWindow - 512
+          : 2048,
       });
       const promptTokens = tokenizerRegistry.estimatePromptTokens(fullPrompt);
 
-      // Cancel any previous generation
       abortRef.current?.abort();
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -240,8 +278,13 @@ export function useLLMEngine(modelPath: string | null) {
       setState((prev) => ({ ...prev, isGenerating: true, error: null }));
 
       try {
+        // Capture the engine ref once — prevents null-dereference if a concurrent
+        // retryLoad() clears engineRef.current mid-flight.
+        const activeEngine = engineRef.current;
+        if (!activeEngine) throw new Error('Engine was unloaded before generation could start.');
+
         const runGeneration = () =>
-          engineRef.current!.generate(
+          activeEngine.generate(
             fullPrompt,
             (event) => {
               if (event.type === 'token') onToken(event.content);
@@ -251,8 +294,13 @@ export function useLLMEngine(modelPath: string | null) {
 
         let response = await runGeneration();
 
-        // Auto-reload llama.rn bridge if it was unloaded between requests
-        if (!response.content && modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte' && !llamaRNBridge.isLoaded()) {
+        // Auto-reload llama.rn if bridge was evicted between requests (GGUF only)
+        if (
+          !response.content &&
+          modelPath &&
+          ModelLoader.getModelFormat(modelPath) !== 'pte' &&
+          !llamaRNBridge.isLoaded()
+        ) {
           await llamaRNBridge.loadModel(modelPath, {
             numThreads: 4,
             contextWindow: selectedModel?.contextWindow ?? 2048,
@@ -268,7 +316,7 @@ export function useLLMEngine(modelPath: string | null) {
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Generation failed';
 
-        // Attempt one reload for GGUF "model not loaded" transient errors
+        // One-shot reload for transient GGUF "model not loaded" errors
         const isGGUF = modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte';
         if (
           isGGUF &&
@@ -280,7 +328,10 @@ export function useLLMEngine(modelPath: string | null) {
               numThreads: 4,
               contextWindow: selectedModel?.contextWindow ?? 2048,
             });
-            const retryResponse = await engineRef.current!.generate(
+            // Re-capture engine ref after the await
+            const activeEngine = engineRef.current;
+            if (!activeEngine) throw new Error('Engine unavailable after reload.');
+            const retryResponse = await activeEngine.generate(
               fullPrompt,
               (event) => {
                 if (event.type === 'token') onToken(event.content);
