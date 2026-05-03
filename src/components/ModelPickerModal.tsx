@@ -16,7 +16,9 @@ import { Cpu, Folder, X, CheckCircle2, FileText } from './icons';
 import { ModelLoader } from '../services/llmEngine/modelLoader';
 import { filePicker } from '../services/filePicker';
 import { useModelStore } from '../store/modelStore';
+import { useSettingsStore } from '../store/settingsStore';
 import { ModelConfig } from '../types/models';
+import TokenizerPickerModal from './TokenizerPickerModal';
 
 interface ModelPickerModalProps {
   visible: boolean;
@@ -34,13 +36,16 @@ export default function ModelPickerModal({ visible, onClose }: ModelPickerModalP
   const {
     availableModels,
     selectedModelPath,
+    selectedTokenizerPath,
     setAvailableModels,
     addModel,
     selectModel,
     setSelectedModelPath,
   } = useModelStore();
+  const mode = useSettingsStore((s) => s.mode);
   const [scanning, setScanning] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [tokenizerPickerOpen, setTokenizerPickerOpen] = useState(false);
 
   const rescan = useCallback(async () => {
     setScanning(true);
@@ -57,6 +62,42 @@ export default function ModelPickerModal({ visible, onClose }: ModelPickerModalP
   useEffect(() => {
     if (visible) rescan();
   }, [visible, rescan]);
+
+  /**
+   * After selecting a PTE model without a tokenizer, warn the user and
+   * offer to pick one immediately. The model selection is committed first
+   * so the user can retry without re-picking the model.
+   */
+  const checkPteTokenizerRequired = useCallback(
+    (format: ModelConfig['format'], onProceed: () => void) => {
+      const needsTokenizer = format === 'pte' && !selectedTokenizerPath;
+      if (!needsTokenizer) {
+        onProceed();
+        return;
+      }
+      // PTE model requires a tokenizer — warn and offer to pick one now
+      Alert.alert(
+        'Tokenizer required',
+        'ExecuTorch (.pte) models require a matching tokenizer file (.bin or .model). ' +
+          'Would you like to select one now?',
+        [
+          {
+            text: 'Select tokenizer',
+            onPress: () => {
+              onProceed();
+              setTokenizerPickerOpen(true);
+            },
+          },
+          {
+            text: 'Skip for now',
+            style: 'cancel',
+            onPress: onProceed,
+          },
+        ]
+      );
+    },
+    [selectedTokenizerPath]
+  );
 
   const handleBrowse = async () => {
     setImporting(true);
@@ -77,7 +118,7 @@ export default function ModelPickerModal({ visible, onClose }: ModelPickerModalP
       addModel(model);
       selectModel(model.id);
       setSelectedModelPath(model.path, model.id);
-      onClose();
+      checkPteTokenizerRequired(model.format, onClose);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Import failed';
       Alert.alert('Could not import model', msg);
@@ -90,7 +131,7 @@ export default function ModelPickerModal({ visible, onClose }: ModelPickerModalP
     addModel(m);
     selectModel(m.id);
     setSelectedModelPath(m.path, m.id);
-    onClose();
+    checkPteTokenizerRequired(m.format, onClose);
   };
 
   return (
@@ -181,6 +222,12 @@ export default function ModelPickerModal({ visible, onClose }: ModelPickerModalP
           </ScrollView>
         </View>
       </View>
+
+      {/* Nested tokenizer picker — shown when a PTE model is selected without one */}
+      <TokenizerPickerModal
+        visible={tokenizerPickerOpen}
+        onClose={() => setTokenizerPickerOpen(false)}
+      />
     </Modal>
   );
 }

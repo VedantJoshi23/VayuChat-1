@@ -82,6 +82,23 @@ export class ChatRepository {
     });
   }
 
+  async incrementMessageCount(id: string): Promise<void> {
+    const db = getDatabase();
+    try {
+      const conv = await db.collections
+        .get<ConversationModel>('conversations')
+        .find(id);
+      await db.write(async () => {
+        await conv.update(() => {
+          conv.messageCount = (conv.messageCount ?? 0) + 1;
+          conv.updatedAt = Date.now();
+        });
+      });
+    } catch (e) {
+      console.warn('[ChatRepository] incrementMessageCount failed:', e);
+    }
+  }
+
   async archiveConversation(id: string): Promise<void> {
     const db = getDatabase();
     const conv = await db.collections

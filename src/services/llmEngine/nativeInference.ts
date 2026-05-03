@@ -1,4 +1,4 @@
-import { NativeModules, NativeEventEmitter } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
 import { BaseLLMEngine } from './LLMEngine';
 import { Response, StreamEvent } from '../../types/common';
 import { InferenceConfig } from '../../types/models';
@@ -6,31 +6,61 @@ import { InferenceConfig } from '../../types/models';
 const { LLMModule } = NativeModules;
 
 /**
- * Generic native inference engine — useful for raw text generation
- * without tool/code post-processing. Loads/unloads native model directly.
+ * ExecuTorch PTE inference engine using the LLMModule native bridge.
+ *
+ * LLMModule native API (Android):
+ *   loadModel(modelPath: string, tokenizerPath: string, temperature: float): Promise<boolean>
+ *   generate(prompt: string, maxTokens: int): Promise<number>  // result code
+ *   stopGeneration(): Promise<boolean>
+ *   unloadModel(): Promise<boolean>
+ *
+ * Tokens are streamed via the "onToken" DeviceEventEmitter event: { token: string }
+ * Model-loaded event: "onModelLoaded" { modelPath: string }
  */
 export class NativeInferenceEngine extends BaseLLMEngine {
   private emitter: NativeEventEmitter | null = null;
-  private modelPath: string;
-
-  constructor(modelPath: string) {
-    super();
-    this.modelPath = modelPath;
-  }
 
   async initialize(config: InferenceConfig): Promise<void> {
-    await super.initialize(config);
-
     if (!LLMModule) {
-      throw new Error('LLMModule native module not available');
+      throw new Error(
+        'LLMModule native module not available. ' +
+          'Ensure the app is built with the ExecuTorch AAR on Android.'
+      );
     }
+    if (Platform.OS !== 'android') {
+      throw new Error('PTE inference is only supported on Android.');
+    }
+    if (!config.modelPath) {
+      throw new Error('modelPath is required for PTE inference.');
+    }
+    if (!config.tokenizerPath) {
+      throw new Error(
+        'tokenizerPath is required for PTE inference. ' +
+          'Please select a tokenizer file (.bin or .model).'
+      );
+    }
+
+    await super.initialize(config);
     this.emitter = new NativeEventEmitter(LLMModule);
 
-    const numThreads = 4;
-    const success = await LLMModule.loadModel(this.modelPath, numThreads);
+    const temperature = config.temperature ?? 0.8;
+
+    let success: boolean;
+    try {
+      success = await LLMModule.loadModel(
+        config.modelPath,
+        config.tokenizerPath,
+        temperature
+      );
+    } catch (e: any) {
+      this.isInitialized = false;
+      const detail = e?.message ?? String(e);
+      throw new Error(`PTE model load failed: ${detail}`);
+    }
+
     if (!success) {
       this.isInitialized = false;
-      throw new Error(`Failed to load model from ${this.modelPath}`);
+      throw new Error(`PTE model load failed (loadModel returned false).`);
     }
   }
 
@@ -40,13 +70,14 @@ export class NativeInferenceEngine extends BaseLLMEngine {
     abortSignal?: AbortSignal
   ): Promise<Response> {
     if (!this.isReady() || !LLMModule || !this.emitter) {
-      throw new Error('NativeInferenceEngine not initialized');
+      throw new Error('NativeInferenceEngine: not initialized — call initialize() first.');
     }
     if (abortSignal?.aborted) {
-      throw new Error('Aborted before generation');
+      throw new Error('Aborted before generation started.');
     }
 
     let collected = '';
+
     const tokenSub = this.emitter.addListener('onToken', (data: { token?: string }) => {
       if (data?.token) {
         collected += data.token;
@@ -54,43 +85,51 @@ export class NativeInferenceEngine extends BaseLLMEngine {
       }
     });
 
-    const abortHandler = () => {
-      try {
-        LLMModule.cancelGenerate?.();
-      } catch {}
+    const stopOnAbort = () => {
+      LLMModule.stopGeneration().catch(() => undefined);
     };
-    abortSignal?.addEventListener('abort', abortHandler);
+    abortSignal?.addEventListener('abort', stopOnAbort);
 
     try {
-      const result: string = await LLMModule.generate(
-        prompt,
-        this.config?.temperature ?? 0.7,
-        this.config?.maxTokens ?? 1024,
-        this.config?.topK ?? 40,
-        this.config?.topP ?? 0.9
-      );
-      if (!collected && result) {
-        collected = result;
-        onStream({ type: 'token', content: result, timestamp: Date.now() });
+      const maxTokens = this.config?.maxTokens ?? 512;
+      const resultCode: number = await LLMModule.generate(prompt, maxTokens);
+
+      if (resultCode !== 0) {
+        throw new Error(`PTE generate() returned error code: ${resultCode}`);
       }
-      return { type: 'direct_inference', content: collected };
+
+      return {
+        type: 'direct_inference',
+        content: collected,
+      };
+    } catch (e: any) {
+      if (abortSignal?.aborted) {
+        return { type: 'direct_inference', content: collected };
+      }
+      throw e;
     } finally {
       tokenSub.remove();
-      abortSignal?.removeEventListener('abort', abortHandler);
+      abortSignal?.removeEventListener('abort', stopOnAbort);
     }
   }
 
   async unload(): Promise<void> {
+    this.emitter?.removeAllListeners('onToken');
+    this.emitter?.removeAllListeners('onModelLoaded');
+    this.emitter = null;
+
     if (LLMModule) {
       try {
         await LLMModule.unloadModel();
-      } catch {}
+      } catch (e) {
+        // Best-effort unload
+      }
     }
-    this.emitter?.removeAllListeners('onToken');
+
     await super.unload();
   }
 }
 
 export function isNativeInferenceAvailable(): boolean {
-  return LLMModule !== undefined;
+  return Platform.OS === 'android' && !!LLMModule;
 }

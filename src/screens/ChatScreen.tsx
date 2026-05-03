@@ -21,6 +21,7 @@ import ModeSelector from '../components/ModeSelector';
 import ModelStatusChip from '../components/ModelStatusChip';
 import ModelPickerModal from '../components/ModelPickerModal';
 import DatasetPickerModal from '../components/DatasetPickerModal';
+import TokenizerPickerModal from '../components/TokenizerPickerModal';
 import { DebugInfo } from '../components/FunctionCallDebugView';
 import { Cpu, Database } from '../components/icons';
 import { useChatStore } from '../store/chatStore';
@@ -30,6 +31,7 @@ import { useDatasetStore } from '../store/datasetStore';
 import { useLLMEngine } from '../hooks/useLLMEngine';
 import { ChatRepository } from '../database/chatRepository';
 import { MessageRepository } from '../database/messageRepository';
+import { ModelLoader } from '../services/llmEngine/modelLoader';
 import { Message } from '../types/chat';
 import {
   DataFrameManager,
@@ -40,7 +42,6 @@ import {
 import { parseFunctionCalls } from '../services/llmEngine/ToolCallingEngine';
 import { TableSchema } from '../services/api/contextBuilder';
 
-// All imports must come before any executable statements
 const { PythonModule } = NativeModules;
 
 const chatRepo = new ChatRepository();
@@ -51,6 +52,7 @@ export default function ChatScreen({ navigation }: any) {
     currentConversation,
     messages,
     isLoading,
+    lastConversationId,
     setCurrentConversation,
     addMessage,
     setMessages,
@@ -58,7 +60,7 @@ export default function ChatScreen({ navigation }: any) {
   } = useChatStore();
   const mode = useSettingsStore((s) => s.mode);
   const devMode = useSettingsStore((s) => s.devMode);
-  const { selectedModelPath, availableModels, selectedModelId, isHydrated } = useModelStore();
+  const { selectedModelPath, availableModels, selectedModelId, selectedTokenizerPath, isHydrated } = useModelStore();
   const { datasets } = useDatasetStore();
   const selectedModel = availableModels.find((m) => m.id === selectedModelId);
 
@@ -66,17 +68,18 @@ export default function ChatScreen({ navigation }: any) {
   const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false);
+  const [tokenizerPickerOpen, setTokenizerPickerOpen] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [debugInfoMap, setDebugInfoMap] = useState<Record<string, DebugInfo>>({});
 
   const dfManagerRef = useRef<DataFrameManager>(new DataFrameManager());
   const tablesLoadedRef = useRef<Set<string>>(new Set());
+  const sessionRestoredRef = useRef(false);
 
   const llmEngine = useLLMEngine(selectedModelPath);
   const headerHeight = useHeaderHeight();
   const insets = useSafeAreaInsets();
 
-  // Table schemas derived from loaded datasets — passed to the system prompt
   const tableSchemas = useMemo<TableSchema[]>(
     () =>
       datasets
@@ -85,16 +88,12 @@ export default function ChatScreen({ navigation }: any) {
     [datasets]
   );
 
-  // Load dataset files into DataFrameManager whenever the datasets list changes.
-  // FIX: forEach(async) is fire-and-forget — tables might not be ready before the
-  // LLM generates its first tool call.  Use Promise.allSettled so all async loads
-  // complete together, and mount-guard the result to avoid state updates after unmount.
+  // Load dataset files into DataFrameManager whenever the datasets list changes
   useEffect(() => {
     let cancelled = false;
     const manager = dfManagerRef.current;
 
     async function loadPendingDatasets() {
-      // Build the list of datasets that still need loading
       const pending = datasets.filter((d) => !tablesLoadedRef.current.has(d.name));
       if (pending.length === 0) return;
 
@@ -103,12 +102,9 @@ export default function ChatScreen({ navigation }: any) {
           let rows: Row[] = [];
 
           if (d.format === 'pkl') {
-            // PKL requires Android + Chaquopy native module
             if (!PythonModule?.loadPickleAsJson) {
               throw new Error(
-                `"${d.name}": PKL files require the Chaquopy Python module ` +
-                  '(Android only). Re-build the app with Chaquopy enabled, ' +
-                  'or convert this file to CSV/JSON.'
+                `"${d.name}": PKL files require the Chaquopy Python module (Android only).`
               );
             }
             const jsonStr: string = await PythonModule.loadPickleAsJson(d.path);
@@ -117,7 +113,6 @@ export default function ChatScreen({ navigation }: any) {
             const text = await RNFS.readFile(d.path, 'utf8');
             rows = parseCSV(text);
           } else {
-            // json
             const text = await RNFS.readFile(d.path, 'utf8');
             rows = parseJSON(text);
           }
@@ -133,26 +128,47 @@ export default function ChatScreen({ navigation }: any) {
           const { name, rows } = result.value;
           manager.addTable(name, rows);
           tablesLoadedRef.current.add(name);
-          console.log(`DataFrameManager: loaded "${name}" (${rows.length} rows)`);
+          console.log(`[DataFrameManager] loaded "${name}" (${rows.length} rows)`);
         } else {
-          console.warn(
-            `DataFrameManager: failed to load "${pending[i].name}":`,
-            result.reason
-          );
+          console.warn(`[DataFrameManager] failed to load "${pending[i].name}":`, result.reason);
         }
       });
     }
 
     loadPendingDatasets();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [datasets]);
 
   const handleDatasetsChanged = useCallback(() => {
     tablesLoadedRef.current.clear();
   }, []);
+
+  // ── Session restore ────────────────────────────────────────────────────────
+  // On first mount (after DB + store hydration), restore the most recent session.
+  // We only do this once per mount to avoid clobbering a conversation the user
+  // explicitly started via ChatHistoryScreen.
+  useEffect(() => {
+    if (!isHydrated || sessionRestoredRef.current) return;
+    if (currentConversation) {
+      // Already have a conversation in memory — no restore needed
+      sessionRestoredRef.current = true;
+      return;
+    }
+    if (!lastConversationId) {
+      sessionRestoredRef.current = true;
+      return;
+    }
+
+    sessionRestoredRef.current = true;
+    chatRepo.getConversation(lastConversationId)
+      .then(async (conv) => {
+        if (!conv) return;
+        const msgs = await msgRepo.getMessagesByConversation(conv.id);
+        setCurrentConversation(conv as any);
+        setMessages(msgs);
+      })
+      .catch((e) => console.warn('[ChatScreen] session restore failed:', e));
+  }, [isHydrated, currentConversation, lastConversationId]);
 
   const renderedMessages = useMemo(
     () => (streamingMessage ? [...messages, streamingMessage] : messages),
@@ -242,27 +258,48 @@ export default function ChatScreen({ navigation }: any) {
   const initializeNewConversation = async () => {
     try {
       const conv = await chatRepo.createConversation(
-        `Chat - ${new Date().toLocaleDateString()}`,
+        `Chat – ${new Date().toLocaleDateString()}`,
         selectedModel?.id ?? 'unknown',
         mode,
-        ''  // System prompt is always injected fresh per-request in useLLMEngine
+        ''
       );
       setCurrentConversation(conv);
     } catch (err) {
-      console.error('Failed to create conversation:', err);
+      console.error('[ChatScreen] Failed to create conversation:', err);
     }
   };
 
   const handleSendMessage = async (text: string) => {
     if (!currentConversation || !text.trim() || !llmEngine.isReady) return;
 
+    // Guard: PTE models in Direct Inference mode require a tokenizer
+    if (
+      mode === 'direct_inference' &&
+      selectedModelPath &&
+      ModelLoader.getModelFormat(selectedModelPath) === 'pte' &&
+      !selectedTokenizerPath
+    ) {
+      Alert.alert(
+        'Tokenizer required',
+        'You must select a tokenizer file before running inference with a .pte model.',
+        [
+          { text: 'Select tokenizer', onPress: () => setTokenizerPickerOpen(true) },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
+      return;
+    }
+
     setIsLoading(true);
     setStreamingContent('');
     setStreamingMessage(null);
 
     try {
+      // Save user message
       const userMsg = await msgRepo.createMessage(currentConversation.id, 'user', text);
       addMessage(userMsg);
+      await chatRepo.incrementMessageCount(currentConversation.id);
+
       const nextMessages = [...messages, userMsg];
 
       const response = await llmEngine.generate(
@@ -278,7 +315,6 @@ export default function ChatScreen({ navigation }: any) {
       let displayContent = response.content;
       let debugInfo: DebugInfo | null = null;
 
-      // Execute tool calls and replace content with the execution result
       if (mode === 'tool_calling' && response.type === 'tool_calling') {
         const functionCalls = parseFunctionCalls(response.content);
         if (functionCalls.length > 0) {
@@ -301,6 +337,7 @@ export default function ChatScreen({ navigation }: any) {
       setStreamingContent('');
       setStreamingMessage(null);
 
+      // Save assistant message
       const assistantMsg = await msgRepo.createMessage(
         currentConversation.id,
         'assistant',
@@ -309,6 +346,7 @@ export default function ChatScreen({ navigation }: any) {
         response.metrics ? { inference: response.metrics } : undefined
       );
       addMessage(assistantMsg);
+      await chatRepo.incrementMessageCount(currentConversation.id);
 
       if (debugInfo) {
         setDebugInfoMap((prev) => ({ ...prev, [assistantMsg.id]: debugInfo! }));
@@ -378,6 +416,10 @@ export default function ChatScreen({ navigation }: any) {
         visible={datasetPickerOpen}
         onClose={() => setDatasetPickerOpen(false)}
         onDatasetsChanged={handleDatasetsChanged}
+      />
+      <TokenizerPickerModal
+        visible={tokenizerPickerOpen}
+        onClose={() => setTokenizerPickerOpen(false)}
       />
     </View>
   );

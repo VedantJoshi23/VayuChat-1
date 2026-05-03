@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { Colors, Shadows } from '../theme/colors';
 import { Typography } from '../theme/typography';
 import { Spacing, BorderRadius } from '../theme/spacing';
@@ -23,6 +24,7 @@ export default function ChatHistoryScreen() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const { setCurrentConversation, setMessages } = useChatStore();
+  const navigation = useNavigation<any>();
 
   useEffect(() => {
     loadConversations();
@@ -33,7 +35,7 @@ export default function ChatHistoryScreen() {
       const convs = await chatRepo.getAllConversations();
       setConversations(convs);
     } catch (error) {
-      console.error('Failed to load conversations:', error);
+      console.error('[ChatHistoryScreen] Failed to load conversations:', error);
     } finally {
       setLoading(false);
     }
@@ -41,11 +43,13 @@ export default function ChatHistoryScreen() {
 
   const handleSelectConversation = async (conv: Conversation) => {
     try {
-      const messages = await msgRepo.getMessagesByConversation(conv.id);
+      const msgs = await msgRepo.getMessagesByConversation(conv.id);
       setCurrentConversation(conv as any);
-      setMessages(messages);
+      setMessages(msgs);
+      // Navigate to the Chat tab so the restored session is immediately visible
+      navigation.navigate('Chat');
     } catch (error) {
-      console.error('Failed to load conversation:', error);
+      console.error('[ChatHistoryScreen] Failed to load conversation messages:', error);
     }
   };
 

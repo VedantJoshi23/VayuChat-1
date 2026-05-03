@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ToolCallingEngine } from '../services/llmEngine/ToolCallingEngine';
 import { DirectInferenceEngine } from '../services/llmEngine/DirectInferenceEngine';
+import { NativeInferenceEngine, isNativeInferenceAvailable } from '../services/llmEngine/nativeInference';
 import { LLMEngine, BaseLLMEngine } from '../services/llmEngine/LLMEngine';
 import { ModelLoader } from '../services/llmEngine/modelLoader';
 import * as llamaRNBridge from '../services/llmEngine/llamaRNBridge';
@@ -16,6 +17,8 @@ import {
 import { useSettingsStore } from '../store/settingsStore';
 import { useModelStore } from '../store/modelStore';
 import { tokenizerRegistry } from '../services/llmEngine/tokenizerRegistry';
+
+const MODEL_LOAD_TIMEOUT_MS = 60_000; // 60 s — PTE can be slow to mmap
 
 interface UseLLMEngineState {
   isReady: boolean;
@@ -36,65 +39,49 @@ export function useLLMEngine(modelPath: string | null) {
   const engineRef = useRef<BaseLLMEngine | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const initPromiseRef = useRef<Promise<void> | null>(null);
-  const mountedRef = useRef(true);  // FIX: Track mounted state for cleanup
   const mode = useSettingsStore((s) => s.mode);
   const { availableModels, selectedModelId, selectedTokenizerPath } = useModelStore();
 
   const selectedModel = availableModels.find((m) => m.id === selectedModelId);
 
-  // Initialize / re-initialize engine when modelPath or mode changes
   useEffect(() => {
     let mounted = true;
-    let currentAbort: AbortController | null = null;
 
     async function init() {
-      // FIX: Abort previous initialization if still running
+      // Abort any previous in-flight init
       if (abortRef.current) {
         abortRef.current.abort();
+        abortRef.current = null;
       }
 
-      currentAbort = new AbortController();
-      abortRef.current = currentAbort;
+      // Unload previous engine first
+      const prevEngine = engineRef.current;
+      engineRef.current = null;
+      if (prevEngine) {
+        prevEngine.unload().catch(() => undefined);
+      }
 
       if (!modelPath) {
-        setState((prev) => ({ ...prev, isReady: false, error: null }));
+        if (mounted) {
+          setState({ isReady: false, isGenerating: false, error: null, engine: null });
+        }
         return;
       }
 
-      try {
-        setState((prev) => ({ ...prev, isReady: false, error: null }));
+      if (mounted) {
+        setState({ isReady: false, isGenerating: false, error: null, engine: null });
+      }
 
-        // Validate model file exists
+      const initAbort = new AbortController();
+      abortRef.current = initAbort;
+
+      try {
+        // Validate the file exists and get format
         await ModelLoader.loadModel(modelPath);
         const modelFormat = ModelLoader.getModelFormat(modelPath);
 
-        if (modelFormat === 'pte') {
-          throw new Error(
-            'ExecuTorch (.pte) inference is not implemented in the current native backend yet.'
-          );
-        }
-
         if (modelFormat === 'onnx') {
-          throw new Error(
-            'ONNX inference is not implemented in the current native backend yet.'
-          );
-        }
-
-        // FIX: Add timeout for model loading
-        const loadPromise = llamaRNBridge.loadModel(modelPath, {
-          numThreads: 4,
-          contextWindow: selectedModel?.contextWindow ?? 2048,
-        });
-
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Model loading timeout (30s)')), 30000);
-        });
-
-        await Promise.race([loadPromise, timeoutPromise]);
-
-        // Check if aborted after long operation
-        if (currentAbort?.signal.aborted) {
-          return;
+          throw new Error('ONNX inference is not yet supported.');
         }
 
         const config: InferenceConfig = {
@@ -102,21 +89,73 @@ export function useLLMEngine(modelPath: string | null) {
           modelPath,
           tokenizerPath: selectedTokenizerPath ?? selectedModel?.tokenizerPath,
           temperature: selectedModel?.temperature ?? 0.7,
-          maxTokens: selectedModel?.maxTokens ?? 1024,
+          maxTokens: selectedModel?.maxTokens ?? 512,
           contextWindow: selectedModel?.contextWindow ?? 2048,
           topK: 40,
           topP: 0.9,
           streamTokens: true,
         };
 
+        // Choose the correct loading strategy
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Model loading timed out after ${MODEL_LOAD_TIMEOUT_MS / 1000}s`)),
+            MODEL_LOAD_TIMEOUT_MS
+          )
+        );
+
+        if (modelFormat === 'pte') {
+          // ── ExecuTorch PTE path ──────────────────────────────────────────
+          if (!isNativeInferenceAvailable()) {
+            throw new Error(
+              'PTE inference requires Android with the ExecuTorch AAR. ' +
+                'This device/build does not support it.'
+            );
+          }
+
+          if (!config.tokenizerPath) {
+            throw new Error(
+              'A tokenizer file is required to load a .pte model. ' +
+                'Please select a tokenizer (.bin or .model) in Settings.'
+            );
+          }
+
+          const nativeEngine = new NativeInferenceEngine();
+          await Promise.race([nativeEngine.initialize(config), timeoutPromise]);
+
+          if (initAbort.signal.aborted || !mounted) {
+            nativeEngine.unload().catch(() => undefined);
+            return;
+          }
+
+          engineRef.current = nativeEngine;
+          setState({
+            isReady: true,
+            isGenerating: false,
+            error: null,
+            engine: nativeEngine as LLMEngine,
+          });
+          return;
+        }
+
+        // ── GGUF path (llama.rn) ─────────────────────────────────────────
+        await Promise.race([
+          llamaRNBridge.loadModel(modelPath, {
+            numThreads: 4,
+            contextWindow: config.contextWindow,
+          }),
+          timeoutPromise,
+        ]);
+
+        if (initAbort.signal.aborted || !mounted) return;
+
         const engine: BaseLLMEngine =
           mode === 'tool_calling' ? new ToolCallingEngine() : new DirectInferenceEngine();
 
         await engine.initialize(config);
 
-        // FIX: Check abort status before updating state
-        if (!mounted || currentAbort?.signal.aborted) {
-          await engine.unload();
+        if (initAbort.signal.aborted || !mounted) {
+          engine.unload().catch(() => undefined);
           return;
         }
 
@@ -128,23 +167,20 @@ export function useLLMEngine(modelPath: string | null) {
           engine: engine as LLMEngine,
         });
       } catch (e) {
-        if (!mounted || currentAbort?.signal.aborted) return;
+        if (initAbort.signal.aborted || !mounted) return;
+
         const msg = e instanceof Error ? e.message : 'Failed to initialize engine';
-        setState((prev) => ({ ...prev, isReady: false, error: msg }));
+        console.error('[useLLMEngine] init error:', msg);
+
+        // Reset engine state cleanly on failure
+        engineRef.current = null;
+        setState({ isReady: false, isGenerating: false, error: msg, engine: null });
       } finally {
         initPromiseRef.current = null;
+        if (abortRef.current === initAbort) {
+          abortRef.current = null;
+        }
       }
-    }
-
-    // Abort any in-flight generation before re-init
-    abortRef.current?.abort();
-    abortRef.current = null;
-
-    // Unload previous engine
-    const prev = engineRef.current;
-    engineRef.current = null;
-    if (prev) {
-      prev.unload().catch(() => undefined);
     }
 
     const initPromise = init();
@@ -171,6 +207,7 @@ export function useLLMEngine(modelPath: string | null) {
       onToken: (token: string) => void,
       tableSchemas?: TableSchema[]
     ): Promise<Response | null> => {
+      // Wait for in-flight init if needed
       if (!state.isReady || !engineRef.current) {
         if (initPromiseRef.current) {
           await initPromiseRef.current;
@@ -178,19 +215,15 @@ export function useLLMEngine(modelPath: string | null) {
       }
 
       if (!engineRef.current || !engineRef.current.isReady()) {
-        throw new Error(state.error || 'Engine not ready');
+        throw new Error(state.error || 'Engine not ready — try reloading the model.');
       }
 
-      // Always build a fresh system prompt so dataset schemas are current
       const systemPrompt =
         mode === 'tool_calling'
           ? buildToolCallingSystemPrompt(tableSchemas ?? [])
           : buildDirectInferenceSystemPrompt();
 
-      const conversationWithSystem: Conversation = {
-        ...conversation,
-        systemPrompt,
-      };
+      const conversationWithSystem: Conversation = { ...conversation, systemPrompt };
 
       const fullPrompt = buildContextPrompt(userQuery, messages, conversationWithSystem, {
         includeSystemPrompt: true,
@@ -199,7 +232,7 @@ export function useLLMEngine(modelPath: string | null) {
       });
       const promptTokens = tokenizerRegistry.estimatePromptTokens(fullPrompt);
 
-      // Set up abort controller for this generation
+      // Cancel any previous generation
       abortRef.current?.abort();
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -218,7 +251,8 @@ export function useLLMEngine(modelPath: string | null) {
 
         let response = await runGeneration();
 
-        if (!response.content && modelPath && !llamaRNBridge.isLoaded()) {
+        // Auto-reload llama.rn bridge if it was unloaded between requests
+        if (!response.content && modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte' && !llamaRNBridge.isLoaded()) {
           await llamaRNBridge.loadModel(modelPath, {
             numThreads: 4,
             contextWindow: selectedModel?.contextWindow ?? 2048,
@@ -233,11 +267,14 @@ export function useLLMEngine(modelPath: string | null) {
         return response;
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Generation failed';
-        const shouldRetryReload =
-          modelPath &&
-          (message.includes('Model not loaded') || message.includes('not initialized'));
 
-        if (shouldRetryReload) {
+        // Attempt one reload for GGUF "model not loaded" transient errors
+        const isGGUF = modelPath && ModelLoader.getModelFormat(modelPath) !== 'pte';
+        if (
+          isGGUF &&
+          modelPath &&
+          (message.includes('Model not loaded') || message.includes('not initialized'))
+        ) {
           try {
             await llamaRNBridge.loadModel(modelPath, {
               numThreads: 4,
@@ -256,9 +293,9 @@ export function useLLMEngine(modelPath: string | null) {
             setState((prev) => ({ ...prev, isGenerating: false, error: null }));
             return retryResponse;
           } catch (retryError) {
-            const retryMessage =
+            const retryMsg =
               retryError instanceof Error ? retryError.message : 'Generation failed';
-            setState((prev) => ({ ...prev, isGenerating: false, error: retryMessage }));
+            setState((prev) => ({ ...prev, isGenerating: false, error: retryMsg }));
             throw retryError;
           }
         }
@@ -274,10 +311,13 @@ export function useLLMEngine(modelPath: string | null) {
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
+    setState((prev) => ({ ...prev, isGenerating: false }));
   }, []);
 
   const retryLoad = useCallback(() => {
-    setState((prev) => ({ ...prev, error: null, isReady: false }));
+    setState({ isReady: false, isGenerating: false, error: null, engine: null });
+    engineRef.current?.unload().catch(() => undefined);
+    engineRef.current = null;
     setReloadKey((prev) => prev + 1);
   }, []);
 
