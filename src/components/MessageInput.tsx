@@ -9,17 +9,15 @@ import {
   Text,
   LayoutAnimation,
   Platform,
-  UIManager,
 } from 'react-native';
 import { Colors, Shadows } from '../theme/colors';
 import { Typography } from '../theme/typography';
 import { Spacing, BorderRadius } from '../theme/spacing';
 import { Send, ChevronDown, ChevronUp } from './icons';
 
-// Enable LayoutAnimation on Android
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
+// Note: UIManager.setLayoutAnimationEnabledExperimental is a no-op in the
+// New Architecture (Fabric/Bridgeless) and produces a warning — do not call it.
+// LayoutAnimation itself works without it in New Architecture.
 
 const SAMPLE_PROMPTS = [
   'What is the current AQI in my city?',

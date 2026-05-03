@@ -40,6 +40,12 @@ import { TableSchema } from '../services/api/contextBuilder';
 const chatRepo = new ChatRepository();
 const msgRepo = new MessageRepository();
 
+// Stable empty object so `debugInfoMap={devMode ? debugInfoMap : {}}` doesn't
+// create a new object reference on every render when devMode is false — that
+// would give MessageList / FlatList a new prop identity every frame and
+// contribute to the VirtualizedList "Maximum update depth exceeded" loop.
+const EMPTY_DEBUG_MAP: Record<string, never> = Object.freeze({}) as Record<string, never>;
+
 export default function ChatScreen({ navigation }: any) {
   const {
     currentConversation,
@@ -69,7 +75,20 @@ export default function ChatScreen({ navigation }: any) {
 
   const dfManagerRef = useRef<DataFrameManager>(new DataFrameManager());
   const tablesLoadedRef = useRef<Set<string>>(new Set());
+  // Tracks datasets whose load is currently IN PROGRESS (not yet complete).
+  // Without this, a re-render caused by setDatasetProgress() can trigger the
+  // [datasets] effect again before tablesLoadedRef is populated, making the
+  // same dataset load concurrently 2-3 times.
+  const tablesLoadingRef = useRef<Set<string>>(new Set());
   const sessionRestoredRef = useRef(false);
+
+  // Streaming token batcher — accumulate tokens in a ref, flush to state on
+  // the next animation frame.  Without this, every single token causes a full
+  // React re-render → streamingMessage useEffect → setStreamingMessage →
+  // another re-render → FlatList new data → VirtualizedList internal setState
+  // loop → "Maximum update depth exceeded".
+  const streamingBufferRef = useRef('');
+  const streamingRafRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
 
   const llmEngine = useLLMEngine(selectedModelPath);
   const headerHeight = useHeaderHeight();
@@ -92,11 +111,20 @@ export default function ChatScreen({ navigation }: any) {
     const manager = dfManagerRef.current;
 
     async function loadPendingDatasets() {
-      const pending = datasets.filter((d) => !tablesLoadedRef.current.has(d.name));
+      // Exclude both already-loaded and currently-in-progress datasets so that
+      // re-renders triggered by setDatasetProgress() don't start duplicate loads.
+      const pending = datasets.filter(
+        (d) =>
+          !tablesLoadedRef.current.has(d.name) &&
+          !tablesLoadingRef.current.has(d.name)
+      );
       if (pending.length === 0) return;
 
-      // Load datasets sequentially to avoid saturating the Python interpreter
-      // or the React Native bridge with parallel large-file requests.
+      // Mark all pending as in-progress before the first await so subsequent
+      // synchronous filter calls in the same tick see them as busy.
+      pending.forEach((d) => tablesLoadingRef.current.add(d.name));
+
+      // Load sequentially to avoid saturating the Python interpreter.
       for (const d of pending) {
         if (cancelled) break;
         try {
@@ -122,6 +150,7 @@ export default function ChatScreen({ navigation }: any) {
         } catch (e) {
           console.warn(`[DataFrameManager] failed to load "${d.name}":`, e);
         } finally {
+          tablesLoadingRef.current.delete(d.name);
           setDatasetProgress((prev) => {
             const next = { ...prev };
             delete next[d.name];
@@ -137,6 +166,7 @@ export default function ChatScreen({ navigation }: any) {
 
   const handleDatasetsChanged = useCallback(() => {
     tablesLoadedRef.current.clear();
+    tablesLoadingRef.current.clear();
   }, []);
 
   // ── Session restore ────────────────────────────────────────────────────────
@@ -265,6 +295,17 @@ export default function ChatScreen({ navigation }: any) {
     }
   };
 
+  // Flush any buffered streaming tokens to state and cancel the pending RAF.
+  // Must be called before every setStreamingContent('') reset so a late-firing
+  // RAF doesn't overwrite the cleared state with stale content.
+  const flushStreamingBuffer = useCallback(() => {
+    if (streamingRafRef.current !== null) {
+      cancelAnimationFrame(streamingRafRef.current);
+      streamingRafRef.current = null;
+    }
+    streamingBufferRef.current = '';
+  }, []);
+
   const handleSendMessage = async (text: string) => {
     if (!currentConversation || !text.trim() || !llmEngine.isReady) return;
 
@@ -287,6 +328,7 @@ export default function ChatScreen({ navigation }: any) {
     }
 
     setIsLoading(true);
+    flushStreamingBuffer();
     setStreamingContent('');
     setStreamingMessage(null);
 
@@ -302,7 +344,19 @@ export default function ChatScreen({ navigation }: any) {
         text,
         currentConversation,
         nextMessages,
-        (token) => setStreamingContent((prev) => prev + token),
+        (token) => {
+          // Batch every token that arrives within the same animation frame into
+          // a single setState call.  Without this, rapid streaming (20+ tok/s)
+          // causes a re-render chain that overwhelms VirtualizedList's internal
+          // state machine and triggers "Maximum update depth exceeded".
+          streamingBufferRef.current += token;
+          if (streamingRafRef.current === null) {
+            streamingRafRef.current = requestAnimationFrame(() => {
+              streamingRafRef.current = null;
+              setStreamingContent(streamingBufferRef.current);
+            });
+          }
+        },
         tableSchemas
       );
 
@@ -330,6 +384,9 @@ export default function ChatScreen({ navigation }: any) {
         }
       }
 
+      // Cancel any pending RAF before clearing so a late frame-flush doesn't
+      // overwrite the empty state with stale buffered tokens.
+      flushStreamingBuffer();
       setStreamingContent('');
       setStreamingMessage(null);
 
@@ -350,6 +407,7 @@ export default function ChatScreen({ navigation }: any) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       Alert.alert('Generation failed', msg);
+      flushStreamingBuffer();
       setStreamingContent('');
       setStreamingMessage(null);
     } finally {
@@ -382,7 +440,7 @@ export default function ChatScreen({ navigation }: any) {
       <MessageList
         messages={renderedMessages}
         isLoading={isLoading}
-        debugInfoMap={devMode ? debugInfoMap : {}}
+        debugInfoMap={devMode ? debugInfoMap : EMPTY_DEBUG_MAP}
       />
       {streamingContent.length > 0 && <View style={styles.streamingIndicator} />}
       <KeyboardAvoidingView
