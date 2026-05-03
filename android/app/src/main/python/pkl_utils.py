@@ -87,6 +87,18 @@ def load_chunk(file_path: str, offset: int, limit: int) -> str:
     )
 
 
+def get_df(file_path: str) -> "pd.DataFrame":
+    """
+    Public accessor for the cached DataFrame — used by code_runner.py so that
+    generated code can reference dataset variables without re-reading the file.
+
+    The cache is populated by the first get_metadata() or load_chunk() call, so
+    by the time code execution runs the DataFrame is almost always already in
+    memory.  If the cache is cold (e.g. after an app restart), this loads it.
+    """
+    return _get_df(file_path)
+
+
 def evict_cache() -> None:
     """Release cached DataFrame (call when dataset is removed by user)."""
     global _cached_path, _cached_df

@@ -8,6 +8,7 @@ import {
   Keyboard,
   KeyboardEvent,
   TouchableOpacity,
+  NativeModules,
 } from 'react-native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,7 +26,7 @@ import { Cpu, Database } from '../components/icons';
 import { useChatStore } from '../store/chatStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { useModelStore } from '../store/modelStore';
-import { useDatasetStore } from '../store/datasetStore';
+import { useDatasetStore, DatasetEntry } from '../store/datasetStore';
 import { useLLMEngine } from '../hooks/useLLMEngine';
 import { ChatRepository } from '../database/chatRepository';
 import { MessageRepository } from '../database/messageRepository';
@@ -39,6 +40,38 @@ import { TableSchema } from '../services/api/contextBuilder';
 
 const chatRepo = new ChatRepository();
 const msgRepo = new MessageRepository();
+const { PythonModule } = NativeModules;
+
+/**
+ * Build a Python preamble that makes each loaded dataset available as a named
+ * DataFrame variable inside code_runner.py's exec() scope.
+ *
+ * The pkl_utils / csv_utils modules cache their DataFrames in Python module-level
+ * memory after the first getDatasetMetadata / loadDatasetChunk call, so calling
+ * get_df() here is effectively free — it just returns the already-loaded object.
+ * On a cold start (app restart) _get_df() will re-read the file transparently.
+ */
+function buildExecutionPreamble(datasets: DatasetEntry[]): string {
+  const lines = datasets
+    .filter((d) => d.columns.length > 0)   // only datasets whose schema we know
+    .map((d) => {
+      const p = d.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      switch (d.format) {
+        case 'pkl':
+          return `import pkl_utils as _pkl\n${d.name} = _pkl.get_df('${p}')`;
+        case 'csv':
+          return `import csv_utils as _csv\n${d.name} = _csv.get_df('${p}')`;
+        case 'json':
+          // JSON is small enough to reload inline; pandas read_json handles it.
+          return `import pandas as _pd\n${d.name} = _pd.read_json('${p}')`;
+        default:
+          return '';
+      }
+    })
+    .filter(Boolean);
+
+  return lines.join('\n');
+}
 
 // Stable empty object so `debugInfoMap={devMode ? debugInfoMap : {}}` doesn't
 // create a new object reference on every render when devMode is false — that
@@ -364,6 +397,7 @@ export default function ChatScreen({ navigation }: any) {
       let debugInfo: DebugInfo | null = null;
 
       if (mode === 'tool_calling' && response.type === 'tool_calling') {
+        // ── Tool-calling: execute DataFrameManager function pipeline ─────────
         const functionCalls = parseFunctionCalls(response.content);
         if (functionCalls.length > 0) {
           const execResult = dfManagerRef.current.executeCalls(functionCalls);
@@ -379,6 +413,38 @@ export default function ChatScreen({ navigation }: any) {
               error: execResult.error,
             };
           }
+        }
+      } else if (mode === 'direct_inference' && response.code && PythonModule?.executePython) {
+        // ── Direct inference: auto-execute generated Python code ─────────────
+        // Prepend dataset loading so named DataFrames are available.
+        // pkl_utils / csv_utils return from their in-memory cache making this
+        // effectively free when datasets were already loaded by ChatScreen.
+        const preamble = buildExecutionPreamble(datasets);
+        const codeToRun = preamble ? `${preamble}\n\n${response.code}` : response.code;
+
+        try {
+          const execResult: { stdout: string; stderr: string; success: boolean } =
+            await PythonModule.executePython(codeToRun, 30_000);
+
+          const stdout = execResult.stdout?.trim();
+          const stderr = execResult.stderr?.trim();
+
+          // Keep the model's full response (includes the code block) and append
+          // the execution output below a horizontal rule so the user sees both.
+          if (stdout || stderr) {
+            displayContent = response.content;
+            if (stdout) {
+              displayContent += `\n\n---\n**Output:**\n\`\`\`\n${stdout}\n\`\`\``;
+            }
+            if (stderr) {
+              displayContent += `\n\n---\n**Error:**\n\`\`\`\n${stderr}\n\`\`\``;
+            }
+          }
+        } catch (execErr) {
+          // Execution failed entirely (Chaquopy not available, timeout, etc.).
+          // Still show the model's response — the user can run the code manually.
+          const errMsg = execErr instanceof Error ? execErr.message : String(execErr);
+          displayContent = response.content + `\n\n---\n**Execution failed:** ${errMsg}`;
         }
       }
 

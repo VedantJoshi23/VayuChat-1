@@ -79,10 +79,17 @@ export class DirectInferenceEngine extends BaseLLMEngine {
     };
   }
 
-  private extractCode(text: string): string {
-    const fenced = text.match(/```(?:python)?\s*([\s\S]*?)```/);
-    if (fenced) return fenced[1].trim();
-    return text.trim();
+  private extractCode(text: string): string | undefined {
+    // Collect every fenced code block (```python ... ``` or ``` ... ```).
+    // Returning undefined when there are no blocks prevents non-code answers
+    // from being accidentally passed to the Python executor.
+    // Multiple blocks are joined so the entire generated analysis can run as
+    // one script (e.g. imports in block 1, plot in block 2).
+    const blocks = [...text.matchAll(/```(?:python)?\s*([\s\S]*?)```/g)]
+      .map((m) => m[1].trim())
+      .filter(Boolean);
+
+    return blocks.length > 0 ? blocks.join('\n\n') : undefined;
   }
 
   async unload(): Promise<void> {

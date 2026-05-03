@@ -78,6 +78,11 @@ def load_chunk(file_path: str, offset: int, limit: int) -> str:
     )
 
 
+def get_df(file_path: str) -> "pd.DataFrame":
+    """Public accessor for the cached DataFrame — used by code_runner.py."""
+    return _get_df(file_path)
+
+
 def evict_cache() -> None:
     global _cached_path, _cached_df
     _cached_path = None
