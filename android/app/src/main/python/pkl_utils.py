@@ -1,37 +1,35 @@
 """
 pkl_utils.py — Chaquopy module for pickle dataset loading.
 
-Key design decisions:
-  - The normalised DataFrame is cached in module-level memory after the first
-    read so that get_metadata() + successive load_chunk() calls only read the
-    file once. At most ONE file is cached; loading a different path evicts the
-    previous entry to cap Python heap usage.
-  - get_metadata() never serialises any row data — it only reads column names
-    and the row count, which is O(1) on a cached DataFrame and very fast even
-    on a cold load of a 100 MB file.
-  - load_chunk(offset, limit) serialises only the requested slice. Callers
-    (Kotlin/JS) request 5 000-row chunks and yield to the event loop between
-    requests, keeping the UI thread free.
+NaN / Infinity handling (same root cause as csv_utils.py):
+  df.where(pd.notnull(df), None) is a NO-OP for float64 columns.
+  json.dumps() then produces the bare token NaN which JavaScript's JSON.parse()
+  correctly rejects with "Unexpected character: N".
+
+  Fix: replace ±Infinity with NaN in _normalise(), then serialise with
+  DataFrame.to_json(orient='records') which maps NaN → null natively.
+
+Cache policy:
+  At most one DataFrame is held in module-level memory.  Loading a different
+  path evicts the previous entry so Python heap usage stays bounded.
+  get_metadata() reads only column names + row count — no row serialisation.
+  load_chunk(offset, limit) serialises only the requested slice.
 """
-import json
+import numpy as np
 import pandas as pd
 
-# Module-level cache: at most one entry to cap Python heap pressure.
 _cached_path: str | None = None
 _cached_df: "pd.DataFrame | None" = None
 
 
 def _normalise(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce dtypes to JSON-safe types in-place and return df."""
-    # datetime → ISO date string
-    for col in df.select_dtypes(include=["datetime64", "datetimetz"]).columns:
-        df[col] = df[col].dt.strftime("%Y-%m-%d")
-    # Replace NaN / NaT / ±inf with None (→ JSON null)
-    df = df.where(pd.notnull(df), None)
-    # Convert any remaining non-serialisable dtypes (e.g. pandas NA, Decimal)
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].apply(lambda v: None if pd.isna(v) if hasattr(v, '__class__') and isinstance(v, float) else False else v)
+    # Replace ±Infinity with NaN so to_json maps them to null.
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # Strip timezone from tz-aware datetime columns so to_json can format them.
+    for col in df.select_dtypes(include=["datetimetz"]).columns:
+        df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+
     return df
 
 
@@ -59,27 +57,34 @@ def _get_df(file_path: str) -> pd.DataFrame:
 
 
 def get_metadata(file_path: str) -> str:
-    """
-    Return {columns, rowCount} without serialising any row data.
-    Safe to call on a 100 MB file — only the header and row count are read.
-    """
+    """Return {columns, rowCount} without serialising any row data."""
+    import json
     df = _get_df(file_path)
     return json.dumps(
-        {"columns": list(df.columns), "rowCount": int(len(df))},
-        default=str,
+        {"columns": list(df.columns), "rowCount": int(len(df))}
     )
 
 
 def load_chunk(file_path: str, offset: int, limit: int) -> str:
     """
-    Serialise rows [offset, offset+limit) as a JSON array string.
-    Returns '[]' for out-of-range offsets rather than raising.
+    Serialise rows [offset, offset+limit) as a valid JSON array string.
+
+    DataFrame.to_json() correctly converts:
+      NaN          → null
+      ±Infinity    → null   (replaced by NaN in _normalise)
+      datetime64   → ISO 8601 string
+      Non-ASCII    → kept as-is (force_ascii=False)
     """
     df = _get_df(file_path)
     if offset >= len(df):
         return "[]"
     chunk = df.iloc[offset : offset + limit]
-    return json.dumps(chunk.to_dict(orient="records"), default=str)
+    return chunk.to_json(
+        orient="records",
+        date_format="iso",
+        default_handler=str,
+        force_ascii=False,
+    )
 
 
 def evict_cache() -> None:

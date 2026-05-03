@@ -129,7 +129,19 @@ export async function loadDatasetRows(
       offset,
       CHUNK_SIZE
     );
-    const chunk: Row[] = JSON.parse(chunkStr);
+    let chunk: Row[];
+    try {
+      chunk = JSON.parse(chunkStr);
+    } catch (parseErr) {
+      // Surface a useful message: show the first 120 chars so the caller can
+      // see what invalid token the Python side produced (e.g. NaN, Infinity).
+      const preview = chunkStr.slice(0, 120).replace(/\n/g, ' ');
+      throw new Error(
+        `Dataset chunk at offset ${offset} contains invalid JSON.\n` +
+          `Preview: ${preview}\n` +
+          `Original error: ${parseErr instanceof Error ? parseErr.message : parseErr}`
+      );
+    }
 
     // Write chunk into pre-allocated array
     for (let i = 0; i < chunk.length; i++) {
