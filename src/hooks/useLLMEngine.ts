@@ -62,7 +62,7 @@ export function useLLMEngine(modelPath: string | null) {
   });
   const [reloadKey, setReloadKey] = useState(0);
 
-  const engineRef = useRef<BaseLLMEngine | null>(null);
+  const engineRef = useRef<LLMEngine | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const initPromiseRef = useRef<Promise<void> | null>(null);
   const mode = useSettingsStore((s) => s.mode);

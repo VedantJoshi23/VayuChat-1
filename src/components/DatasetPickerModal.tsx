@@ -9,9 +9,7 @@ import {
   Alert,
   TextInput,
   ActivityIndicator,
-  NativeModules,
 } from 'react-native';
-import RNFS from 'react-native-fs';
 import { Colors, Shadows } from '../theme/colors';
 import { Typography } from '../theme/typography';
 import { Spacing, BorderRadius } from '../theme/spacing';
@@ -26,21 +24,7 @@ import {
 } from './icons';
 import { filePicker } from '../services/filePicker';
 import { useDatasetStore, DatasetEntry } from '../store/datasetStore';
-import { parseCSV, parseJSON, Row } from '../services/dataOperations/DataFrameManager';
-
-const { PythonModule } = NativeModules;
-
-async function loadPickleRows(filePath: string): Promise<Row[]> {
-  if (!PythonModule?.loadPickleAsJson) {
-    throw new Error(
-      'PKL files require the Chaquopy Python module (Android only).\n' +
-        'Either re-build the app with Chaquopy enabled, or convert this ' +
-        'file to CSV or JSON first.'
-    );
-  }
-  const jsonStr: string = await PythonModule.loadPickleAsJson(filePath);
-  return JSON.parse(jsonStr) as Row[];
-}
+import { getDatasetMeta } from '../services/datasetManager/DatasetLoader';
 
 interface Props {
   visible: boolean;
@@ -89,36 +73,23 @@ export default function DatasetPickerModal({ visible, onClose, onDatasetsChanged
     addDataset({ name, path: pendingFile.path, format, size: pendingFile.size });
     resetPending();
 
-    // Eagerly parse to extract column info
+    // Extract column names + row count via lightweight metadata call.
+    // getDatasetMeta() never serialises row data, so it is fast even on
+    // 100 MB pkl files.  Actual rows are loaded lazily by ChatScreen when
+    // the DataFrameManager first needs the table.
     try {
-      let rows: Row[] = [];
-      if (format === 'pkl') {
-        rows = await loadPickleRows(pendingFile.path);
-      } else {
-        const text = await RNFS.readFile(pendingFile.path, 'utf8');
-        rows = format === 'csv' ? parseCSV(text) : parseJSON(text);
-      }
-      const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+      const meta = await getDatasetMeta(pendingFile.path, format);
       updateDatasetMeta(name, {
-        columns,
-        rowCount: rows.length,
+        columns: meta.columns,
+        rowCount: meta.rowCount,
         loadedAt: new Date().toISOString(),
       });
     } catch (e) {
-      // Non-fatal — file is registered but schema metadata won't be shown until loaded
       const msg = e instanceof Error ? e.message : String(e);
-      if (format === 'pkl') {
-        Alert.alert(
-          'PKL preview unavailable',
-          `"${name}" was added but column info couldn't be read.\n\n${msg}`
-        );
-      } else {
-        // For CSV/JSON parsing errors, surface the detail so the user can fix the file
-        Alert.alert(
-          `${format.toUpperCase()} preview failed`,
-          `"${name}" was added but couldn't be parsed: ${msg}`
-        );
-      }
+      Alert.alert(
+        `${format.toUpperCase()} preview unavailable`,
+        `"${name}" was added but column info couldn't be read.\n\n${msg}`
+      );
     }
 
     onDatasetsChanged?.();

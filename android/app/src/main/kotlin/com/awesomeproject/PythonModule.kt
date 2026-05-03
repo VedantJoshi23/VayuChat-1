@@ -133,6 +133,73 @@ class PythonModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Extract column names and row count for a dataset file without
+     * serialising any row data.  Returns a JSON string:
+     *   {"columns": [...], "rowCount": N}
+     *
+     * Safe to call on 100 MB+ files — the Python side caches the parsed
+     * DataFrame so successive load_chunk() calls don't re-read the file.
+     *
+     * @param format  "pkl" | "csv"  (JSON files are handled entirely in JS)
+     */
+    @ReactMethod
+    fun getDatasetMetadata(filePath: String, format: String, promise: Promise) {
+        scope.launch {
+            try {
+                ensurePythonStarted()
+                val py  = Python.getInstance()
+                val mod = when (format) {
+                    "pkl" -> py.getModule("pkl_utils")
+                    "csv" -> py.getModule("csv_utils")
+                    else  -> { promise.reject("METADATA_ERROR", "Unsupported format: $format"); return@launch }
+                }
+                val result = mod.callAttr("get_metadata", filePath)?.toString() ?: "{}"
+                Log.d(TAG, "getDatasetMetadata: $format $filePath -> $result")
+                promise.resolve(result)
+            } catch (e: PyException) {
+                Log.e(TAG, "getDatasetMetadata Python error: ${e.message}", e)
+                promise.reject("METADATA_ERROR", e.message ?: "Python error")
+            } catch (e: Exception) {
+                Log.e(TAG, "getDatasetMetadata error: ${e.message}", e)
+                promise.reject("METADATA_ERROR", e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    /**
+     * Return rows [offset, offset+limit) from a dataset file as a JSON array
+     * string.  The Python side caches the parsed DataFrame after the first
+     * call to get_metadata() or load_chunk(), so repeated chunk requests are
+     * fast (no re-read from disk).
+     *
+     * @param format  "pkl" | "csv"
+     * @param offset  zero-based row index of the first row in the chunk
+     * @param limit   maximum number of rows to include (last chunk may be smaller)
+     */
+    @ReactMethod
+    fun loadDatasetChunk(filePath: String, format: String, offset: Int, limit: Int, promise: Promise) {
+        scope.launch {
+            try {
+                ensurePythonStarted()
+                val py  = Python.getInstance()
+                val mod = when (format) {
+                    "pkl" -> py.getModule("pkl_utils")
+                    "csv" -> py.getModule("csv_utils")
+                    else  -> { promise.reject("CHUNK_LOAD_ERROR", "Unsupported format: $format"); return@launch }
+                }
+                val result = mod.callAttr("load_chunk", filePath, offset, limit)?.toString() ?: "[]"
+                promise.resolve(result)
+            } catch (e: PyException) {
+                Log.e(TAG, "loadDatasetChunk Python error: ${e.message}", e)
+                promise.reject("CHUNK_LOAD_ERROR", e.message ?: "Python error")
+            } catch (e: Exception) {
+                Log.e(TAG, "loadDatasetChunk error: ${e.message}", e)
+                promise.reject("CHUNK_LOAD_ERROR", e.message ?: "Unknown error")
+            }
+        }
+    }
+
     @ReactMethod
     fun validateCode(code: String, promise: Promise) {
         try {

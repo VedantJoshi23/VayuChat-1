@@ -7,12 +7,10 @@ import {
   Alert,
   Keyboard,
   KeyboardEvent,
-  NativeModules,
   TouchableOpacity,
 } from 'react-native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import RNFS from 'react-native-fs';
 import { Colors } from '../theme/colors';
 import MessageList from '../components/MessageList';
 import MessageInput from '../components/MessageInput';
@@ -33,16 +31,11 @@ import { ChatRepository } from '../database/chatRepository';
 import { MessageRepository } from '../database/messageRepository';
 import { ModelLoader } from '../services/llmEngine/modelLoader';
 import { Message } from '../types/chat';
-import {
-  DataFrameManager,
-  parseCSV,
-  parseJSON,
-  Row,
-} from '../services/dataOperations/DataFrameManager';
+import { DataFrameManager } from '../services/dataOperations/DataFrameManager';
+import { loadDatasetRows, LoadProgress } from '../services/datasetManager/DatasetLoader';
 import { parseFunctionCalls } from '../services/llmEngine/ToolCallingEngine';
 import { TableSchema } from '../services/api/contextBuilder';
 
-const { PythonModule } = NativeModules;
 
 const chatRepo = new ChatRepository();
 const msgRepo = new MessageRepository();
@@ -69,6 +62,8 @@ export default function ChatScreen({ navigation }: any) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false);
   const [tokenizerPickerOpen, setTokenizerPickerOpen] = useState(false);
+  // Per-dataset loading progress (name → 0–100)
+  const [datasetProgress, setDatasetProgress] = useState<Record<string, number>>({});
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [debugInfoMap, setDebugInfoMap] = useState<Record<string, DebugInfo>>({});
 
@@ -88,7 +83,10 @@ export default function ChatScreen({ navigation }: any) {
     [datasets]
   );
 
-  // Load dataset files into DataFrameManager whenever the datasets list changes
+  // Load dataset files into DataFrameManager whenever the datasets list changes.
+  // Uses chunked Python loading for pkl + large CSV so the JS thread is never
+  // blocked for more than a few ms at a time.  JSON and tiny CSV files are
+  // handled inline in JS as before.
   useEffect(() => {
     let cancelled = false;
     const manager = dfManagerRef.current;
@@ -97,42 +95,40 @@ export default function ChatScreen({ navigation }: any) {
       const pending = datasets.filter((d) => !tablesLoadedRef.current.has(d.name));
       if (pending.length === 0) return;
 
-      const results = await Promise.allSettled(
-        pending.map(async (d) => {
-          let rows: Row[] = [];
-
-          if (d.format === 'pkl') {
-            if (!PythonModule?.loadPickleAsJson) {
-              throw new Error(
-                `"${d.name}": PKL files require the Chaquopy Python module (Android only).`
-              );
+      // Load datasets sequentially to avoid saturating the Python interpreter
+      // or the React Native bridge with parallel large-file requests.
+      for (const d of pending) {
+        if (cancelled) break;
+        try {
+          const rows = await loadDatasetRows(
+            d.path,
+            d.format,
+            d.size,
+            (p: LoadProgress) => {
+              if (cancelled) return;
+              const pct =
+                p.phase === 'metadata' ? 5
+                : p.phase === 'done'   ? 100
+                : p.totalRows > 0     ? Math.round(5 + (p.rowsLoaded / p.totalRows) * 94)
+                : 10;
+              setDatasetProgress((prev) => ({ ...prev, [d.name]: pct }));
             }
-            const jsonStr: string = await PythonModule.loadPickleAsJson(d.path);
-            rows = JSON.parse(jsonStr) as Row[];
-          } else if (d.format === 'csv') {
-            const text = await RNFS.readFile(d.path, 'utf8');
-            rows = parseCSV(text);
-          } else {
-            const text = await RNFS.readFile(d.path, 'utf8');
-            rows = parseJSON(text);
-          }
+          );
 
-          return { name: d.name, rows };
-        })
-      );
-
-      if (cancelled) return;
-
-      results.forEach((result, i) => {
-        if (result.status === 'fulfilled') {
-          const { name, rows } = result.value;
-          manager.addTable(name, rows);
-          tablesLoadedRef.current.add(name);
-          console.log(`[DataFrameManager] loaded "${name}" (${rows.length} rows)`);
-        } else {
-          console.warn(`[DataFrameManager] failed to load "${pending[i].name}":`, result.reason);
+          if (cancelled) break;
+          manager.addTable(d.name, rows);
+          tablesLoadedRef.current.add(d.name);
+          console.log(`[DataFrameManager] loaded "${d.name}" (${rows.length} rows)`);
+        } catch (e) {
+          console.warn(`[DataFrameManager] failed to load "${d.name}":`, e);
+        } finally {
+          setDatasetProgress((prev) => {
+            const next = { ...prev };
+            delete next[d.name];
+            return next;
+          });
         }
-      });
+      }
     }
 
     loadPendingDatasets();
